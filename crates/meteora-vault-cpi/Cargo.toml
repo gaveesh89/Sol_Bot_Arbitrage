@@ -1,0 +1,12 @@
+[package]
+name = "meteora-vault-cpi"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anchor-lang = "0.29"
+anchor-spl = "0.29"
+solana-program = "1.18"
+
+[dev-dependencies]
+solana-sdk = "1.18"
