@@ -7,7 +7,7 @@ mod meteora;
 mod utils;
 
 use anyhow::{Context, Result};
-use chain::{MarketDataFetcher, PriceMonitor, TokenFetcher};
+use chain::{MarketDataFetcher, PriceMonitor, TokenFetcher, TransactionExecutor};
 use chain::token_fetch::DexType;
 use config::Config;
 use meteora::{MeteoraDAMMClient, MeteoraVaultClient};
@@ -136,6 +136,28 @@ async fn main() -> Result<()> {
     info!("✅ Meteora Vault client initialized");
     debug!("   Vault Program ID: {}", config.dex.meteora_vault_program_id);
 
+    // ========================================================================
+    // Step 5.5: Initialize TransactionExecutor with execution mode
+    // ========================================================================
+    // DECISION: Use is_simulation_mode from Config (Chosen) vs CLI argument
+    // Rationale: Config file easier to manage, less prone to human error
+    // OPTIMIZE: Log execution mode at startup for clarity
+    let _transaction_executor = Arc::new(TransactionExecutor::new(Arc::clone(&rpc_client)));
+    info!("✅ Transaction executor initialized");
+    
+    // Log execution mode prominently for safety
+    if config.bot.is_simulation_mode {
+        info!("   🧪 Execution Mode: SIMULATION (zero-risk testing)");
+        info!("   💡 All transactions will be simulated only");
+        info!("   ✅ No real funds will be used");
+        info!("   📝 Set BOT_SIMULATION_MODE=false to enable live execution");
+    } else {
+        warn!("   ⚠️  Execution Mode: LIVE (REAL FUNDS AT RISK)");
+        warn!("   💰 Transactions will be submitted to the blockchain");
+        warn!("   🔥 Real SOL/tokens will be used");
+        warn!("   🛡️  Set BOT_SIMULATION_MODE=true for safe testing");
+    }
+
     // Initialize multi-RPC sender for transaction spamming
     let mut rpc_urls = vec![config.rpc.url.clone()];
     rpc_urls.extend(config.rpc.backup_urls.clone());
@@ -242,6 +264,8 @@ async fn main() -> Result<()> {
     info!("📈 Starting continuous price monitoring...");
     info!("");
     info!("⚙️  Active Configuration Summary:");
+    info!("   ├─ Execution Mode: {}", 
+        if config.bot.is_simulation_mode { "SIMULATION 🧪" } else { "LIVE ⚠️" });
     info!("   ├─ Strategy: Arbitrage={}, Sandwich={}", 
         config.bot.enable_arbitrage, config.bot.enable_sandwich);
     info!("   ├─ Profit threshold: {} bps ({:.2}%)", 
@@ -307,13 +331,27 @@ fn load_keypair(wallet_config: &config::WalletConfig) -> Result<Keypair> {
     }
 }
 
-/// Example function for executing arbitrage (currently not called)
+/// Execute arbitrage opportunity with configurable execution mode
+/// 
+/// Feature: Main Loop Execution Switch
+/// 
+/// CoT: After finding an arbitrage opportunity and building the transaction,
+/// execute it using the unified executor with mode switching based on configuration.
+/// 
+/// DECISION: Use is_simulation_mode from Config (Chosen) vs CLI argument
+/// Rationale: Config file easier to manage, less prone to human error than CLI flag
+/// 
+/// OPTIMIZE: Use tracing macro to log execution mode for each transaction
+/// 
+/// Alternative: Use separate binary for simulation and live execution to enforce
+/// separation at the build level (more complex but stronger safety guarantee)
 #[allow(dead_code)]
 async fn execute_arbitrage(
     opportunity: &chain::token_price::ArbitrageOpportunity,
     rpc_client: Arc<RpcClient>,
     payer: Arc<Keypair>,
     config: &Config,
+    executor: Arc<TransactionExecutor>,
 ) -> Result<String> {
     info!("🎯 Executing arbitrage opportunity:");
     info!("   Buy on {:?} @ {}", opportunity.buy_dex, opportunity.buy_price);
@@ -321,7 +359,9 @@ async fn execute_arbitrage(
     info!("   Expected gross profit: {} bps", opportunity.gross_profit_bps);
     info!("   Expected net profit: {} bps", opportunity.net_profit_bps);
 
-    // Build transaction
+    // ========================================================================
+    // Step 1: Build Transaction
+    // ========================================================================
     let mut tx_builder = TransactionBuilder::new(payer.pubkey());
     tx_builder
         .set_compute_unit_limit(config.execution.compute_unit_limit)
@@ -329,21 +369,140 @@ async fn execute_arbitrage(
 
     // TODO: Add actual swap instructions here
     // Example:
-    // 1. Buy instruction (buy_dex)
-    // 2. Sell instruction (sell_dex)
+    // 1. Buy instruction (buy_dex) - swap SOL/USDC to target token
+    // 2. Sell instruction (sell_dex) - swap target token back to SOL/USDC
     
-    // Simulate transaction
-    tx_builder.simulate(&rpc_client, &payer).await?;
+    info!("📝 Building arbitrage transaction with {} compute units", 
+        config.execution.compute_unit_limit);
 
     // Build final transaction
     let transaction = tx_builder.build(&rpc_client, &payer).await?;
-
-    // Send to multiple RPCs for higher inclusion probability
-    let multi_rpc_sender = MultiRpcSender::new(vec![config.rpc.url.clone()]);
-    let signature = multi_rpc_sender
-        .send_and_get_first_success(&transaction)
+    
+    // ========================================================================
+    // Step 2: Execute with Mode Switch (Simulation or Live)
+    // Uses config.bot.is_simulation_mode to determine execution mode
+    // ========================================================================
+    info!("🎬 Executing transaction in {} mode", 
+        if config.bot.is_simulation_mode { "SIMULATION" } else { "LIVE" });
+    
+    let result = executor
+        .execute_arbitrage(&transaction, &payer, config.bot.is_simulation_mode)
         .await?;
 
-    info!("✅ Arbitrage executed successfully: {}", signature);
-    Ok(signature.to_string())
+    // ========================================================================
+    // Step 3: Process and Log Result
+    // ========================================================================
+    match result {
+        chain::ArbitrageExecutionResult::Simulation(sim_result) => {
+            if sim_result.success {
+                info!("✅ Simulation passed!");
+                info!("   Compute units consumed: {}/{}", 
+                    sim_result.compute_units_consumed, 
+                    config.execution.compute_unit_limit);
+                info!("   Efficiency: {:.1}%", 
+                    (sim_result.compute_units_consumed as f64 / config.execution.compute_unit_limit as f64) * 100.0);
+                
+                // Log sample of transaction logs for debugging
+                if !sim_result.logs.is_empty() {
+                    debug!("   Transaction logs (first 5):");
+                    for (idx, log) in sim_result.logs.iter().take(5).enumerate() {
+                        debug!("     [{}] {}", idx, log);
+                    }
+                }
+                
+                Ok(format!("SIMULATED:{}", sim_result.compute_units_consumed))
+            } else {
+                error!("❌ Simulation failed");
+                error!("   Error: {:?}", sim_result.error);
+                error!("   Compute units consumed: {}", sim_result.compute_units_consumed);
+                
+                // Log all transaction logs for debugging failures
+                for (idx, log) in sim_result.logs.iter().enumerate() {
+                    error!("   Log[{}]: {}", idx, log);
+                }
+                
+                Err(anyhow::anyhow!(
+                    "Simulation failed: {:?}",
+                    sim_result.error
+                ))
+            }
+        }
+        chain::ArbitrageExecutionResult::Live(exec_result) => {
+            if exec_result.confirmed && exec_result.error.is_none() {
+                info!("✅ Transaction confirmed on-chain!");
+                info!("   Signature: {}", exec_result.signature);
+                info!("   Slot: {}", exec_result.slot);
+                info!("   💰 Arbitrage executed successfully");
+                
+                Ok(exec_result.signature)
+            } else if let Some(error) = exec_result.error {
+                error!("❌ Transaction failed on-chain");
+                error!("   Error: {}", error);
+                if !exec_result.signature.is_empty() {
+                    error!("   Signature: {}", exec_result.signature);
+                }
+                
+                Err(anyhow::anyhow!("Transaction failed: {}", error))
+            } else {
+                warn!("⚠️  Transaction status unclear");
+                warn!("   Confirmed: {}", exec_result.confirmed);
+                warn!("   Signature: {}", exec_result.signature);
+                
+                Ok(format!("UNCLEAR:{}", exec_result.signature))
+            }
+        }
+    }
 }
+
+/// Execute multiple arbitrage opportunities concurrently
+/// 
+/// OPTIMIZE: Uses tokio::spawn to process multiple opportunities in parallel
+/// This maximizes throughput when multiple profitable trades are found simultaneously
+#[allow(dead_code)]
+async fn execute_arbitrage_batch(
+    opportunities: Vec<chain::token_price::ArbitrageOpportunity>,
+    rpc_client: Arc<RpcClient>,
+    payer: Arc<Keypair>,
+    config: Arc<Config>,
+    executor: Arc<TransactionExecutor>,
+) -> Vec<Result<String>> {
+    info!("🚀 Executing {} arbitrage opportunities concurrently", opportunities.len());
+    
+    let mut handles = Vec::new();
+
+    for (idx, opportunity) in opportunities.into_iter().enumerate() {
+        let rpc_client = Arc::clone(&rpc_client);
+        let payer = Arc::clone(&payer);
+        let config = Arc::clone(&config);
+        let executor = Arc::clone(&executor);
+        
+        // Spawn each execution in parallel for maximum throughput
+        let handle = tokio::spawn(async move {
+            info!("   [{}] Starting concurrent execution", idx);
+            let result = execute_arbitrage(&opportunity, rpc_client, payer, &config, executor).await;
+            match &result {
+                Ok(sig) => info!("   [{}] ✅ Success: {}", idx, sig),
+                Err(e) => error!("   [{}] ❌ Failed: {}", idx, e),
+            }
+            result
+        });
+        
+        handles.push(handle);
+    }
+
+    // Wait for all executions to complete
+    let mut results = Vec::new();
+    for handle in handles {
+        match handle.await {
+            Ok(result) => results.push(result),
+            Err(e) => results.push(Err(anyhow::anyhow!("Task panicked: {}", e))),
+        }
+    }
+
+    info!("✅ Batch execution complete: {}/{} successful", 
+        results.iter().filter(|r| r.is_ok()).count(),
+        results.len());
+
+    results
+}
+

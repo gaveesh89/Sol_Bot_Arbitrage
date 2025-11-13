@@ -29,6 +29,12 @@ pub struct BotConfig {
     pub enable_arbitrage: bool,
     pub enable_sandwich: bool,
     pub max_position_size: u64,
+    /// Execution mode: true = simulation only (zero-risk), false = live execution
+    /// DECISION: Boolean flag (Chosen) vs ExecutionMode enum
+    /// Rationale: Simpler for quick on/off switch between Simulate/Live modes
+    /// OPTIMIZE: Defaults to true to prevent accidental live execution
+    /// Alternative: If more modes needed (Devnet, etc.), refactor to ExecutionMode enum
+    pub is_simulation_mode: bool,
 }
 
 /// Routing and pathfinding configuration
@@ -144,6 +150,9 @@ impl Config {
             enable_arbitrage: get_bool_env("ENABLE_ARBITRAGE", true),
             enable_sandwich: get_bool_env("ENABLE_SANDWICH", false),
             max_position_size: get_u64_env("MAX_POSITION_SIZE", 1_000_000_000)?, // 1 SOL default
+            // Read BOT_SIMULATION_MODE from environment, default to true for safety
+            // This ensures the bot runs in simulation mode unless explicitly set to false
+            is_simulation_mode: get_bool_env("BOT_SIMULATION_MODE", true),
         };
 
         // Routing configuration
