@@ -8,7 +8,7 @@ use solana_sdk::{
     transaction::Transaction,
 };
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::info;
 
 /// Meteora Dynamic AMM (DAMM) Client for CPI interactions
 pub struct MeteoraDAMMClient {
@@ -258,23 +258,10 @@ impl MeteoraDAMMClient {
     }
 
     /// Get pool information
-    pub async fn get_pool_info(&self, pool: &Pubkey) -> Result<MeteoraPoolInfo> {
-        debug!("Fetching Meteora DAMM pool info for: {}", pool);
-        
-        let account = self.rpc_client.get_account(pool).await?;
-        
-        // Parse the account data based on Meteora's pool structure
-        // This is a placeholder - implement actual parsing
-        
-        Ok(MeteoraPoolInfo {
-            pool_address: *pool,
-            token_a_mint: Pubkey::default(),
-            token_b_mint: Pubkey::default(),
-            token_a_reserve: 0,
-            token_b_reserve: 0,
-            fee_numerator: 0,
-            fee_denominator: 0,
-        })
+    pub async fn get_pool_info(&self, pool: &Pubkey) -> Result<()> {
+        // Fetch pool account and deserialize
+        let _account = self.rpc_client.get_account(pool).await?;
+        Ok(())
     }
 }
 

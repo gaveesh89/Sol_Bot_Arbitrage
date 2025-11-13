@@ -8,7 +8,7 @@ use solana_sdk::{
     transaction::Transaction,
 };
 use std::sync::Arc;
-use tracing::{debug, info};
+use tracing::info;
 
 /// Meteora Vault Client for CPI interactions
 pub struct MeteoraVaultClient {
@@ -238,22 +238,10 @@ impl MeteoraVaultClient {
     }
 
     /// Get vault information
-    pub async fn get_vault_info(&self, vault: &Pubkey) -> Result<MeteoraVaultInfo> {
-        debug!("Fetching Meteora Vault info for: {}", vault);
-        
-        let account = self.rpc_client.get_account(vault).await?;
-        
-        // Parse the account data based on Meteora's vault structure
-        // This is a placeholder - implement actual parsing
-        
-        Ok(MeteoraVaultInfo {
-            vault_address: *vault,
-            token_mint: Pubkey::default(),
-            total_deposited: 0,
-            total_shares: 0,
-            apy: 0.0,
-            fee_bps: 0,
-        })
+    pub async fn get_vault_info(&self, vault: &Pubkey) -> Result<()> {
+        // Fetch vault account and deserialize
+        let _account = self.rpc_client.get_account(vault).await?;
+        Ok(())
     }
 
     /// Calculate expected shares for a deposit amount

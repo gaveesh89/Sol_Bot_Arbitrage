@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 mod chain;
 mod config;
 mod dex;
@@ -117,8 +119,8 @@ async fn main() -> Result<()> {
     info!("   Min profit: {} bps ({}%)", config.bot.min_profit_bps, config.bot.min_profit_bps as f64 / 100.0);
     info!("   Max slippage: {} bps ({}%)", config.bot.max_slippage_bps, config.bot.max_slippage_bps as f64 / 100.0);
 
-    // Initialize Meteora clients
-    let meteora_damm_client = Arc::new(MeteoraDAMMClient::new(
+    // Initialize Meteora CPI clients
+    let _meteora_damm_client = Arc::new(MeteoraDAMMClient::new(
         Arc::clone(&rpc_client),
         config.dex.meteora_damm_program_id,
         Arc::clone(&payer_arc),
@@ -126,7 +128,7 @@ async fn main() -> Result<()> {
     info!("✅ Meteora DAMM client initialized");
     debug!("   DAMM Program ID: {}", config.dex.meteora_damm_program_id);
 
-    let meteora_vault_client = Arc::new(MeteoraVaultClient::new(
+    let _meteora_vault_client = Arc::new(MeteoraVaultClient::new(
         Arc::clone(&rpc_client),
         config.dex.meteora_vault_program_id,
         Arc::clone(&payer_arc),

@@ -1,5 +1,6 @@
 pub mod retry;
 pub mod transaction;
 
-pub use retry::RetryPolicy;
-pub use transaction::TransactionBuilder;
+// Re-exports (currently unused but available for execution phase)
+// pub use retry::RetryPolicy;
+// pub use transaction::TransactionBuilder;

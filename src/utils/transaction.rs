@@ -7,7 +7,8 @@ use solana_sdk::{
     message::Message,
     pubkey::Pubkey,
     signature::{Keypair, Signature},
-    signer::Signer,
+    // signer::Signer,
+    // system_instruction,
     transaction::{Transaction, VersionedTransaction},
 };
 use std::sync::Arc;
@@ -104,11 +105,11 @@ impl TransactionBuilder {
     }
 
     /// Build a versioned transaction (optimized with address lookup tables)
-    pub async fn build_versioned(
-        &self,
-        rpc_client: &RpcClient,
+    pub async fn build_with_alt(
+        self,
+        rpc_client: Arc<RpcClient>,
+        _lookup_tables: Vec<Pubkey>,
         signer: &Keypair,
-        lookup_tables: Vec<Pubkey>,
     ) -> Result<VersionedTransaction> {
         let mut instructions = Vec::new();
 
@@ -128,7 +129,7 @@ impl TransactionBuilder {
         // This is a simplified version
         warn!("Versioned transaction building with ALT is not fully implemented");
 
-        let recent_blockhash = rpc_client
+        let _recent_blockhash = rpc_client
             .get_latest_blockhash()
             .await
             .context("Failed to get recent blockhash")?;
