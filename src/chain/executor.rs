@@ -40,29 +40,45 @@ impl TransactionExecutor {
 
     /// Execute arbitrage transaction in simulation mode (zero-risk testing)
     /// 
+    /// Feature: Zero-Risk Transaction Simulation
+    /// 
     /// This method simulates the transaction without actually submitting it to the network.
     /// It provides:
-    /// - Detailed transaction logs
-    /// - Compute unit usage statistics
-    /// - Success/failure prediction
-    /// - No cost or risk
+    /// - Detailed transaction logs for manual verification of arbitrage logic
+    /// - Compute unit usage statistics for priority fee estimation
+    /// - Success/failure prediction without spending SOL
+    /// - No cost or risk (perfect for testing)
+    /// 
+    /// Implementation Steps:
+    /// 1. Define RpcSimulateTransactionConfig with latest blockhash and logs enabled
+    /// 2. Call rpc_client.simulate_transaction_with_config() with the configuration
+    /// 3. Check simulation result for errors (simulation_result.value.err)
+    /// 4. If error found, log error details and transaction logs
+    /// 5. If successful, log success, units_consumed, and transaction logs
+    /// 6. Return SimulationResult (enhanced version of Ok(()) with structured data)
     /// 
     /// # Arguments
     /// * `transaction` - The transaction to simulate
-    /// * `signer` - The keypair that will sign the transaction
+    /// * `signer` - The keypair that will sign the transaction (for logging/consistency)
     /// 
     /// # Returns
-    /// Result containing simulation outcome details
+    /// Result<SimulationResult> containing simulation outcome details
     /// 
     /// # Design Choice
+    /// DECISION: Use RpcSimulateTransactionConfig (Chosen) vs simple simulate_transaction call
+    /// Rationale: Config allows setting replace_recent_blockhash: true and commitment: processed,
+    ///            which is essential for a realistic test that matches actual execution conditions
+    /// 
     /// Uses tracing::info! and tracing::error! over println!
     /// Rationale: Provides structured, filterable logging essential for high-performance bots
     /// 
     /// # Optimization
-    /// Logs exact units_consumed to validate transaction efficiency
+    /// OPTIMIZE: Log the units_consumed to validate the transaction's efficiency and estimate
+    ///           real priority fees. Warn if usage exceeds 800K compute units (approaching 1.4M limit)
     /// 
     /// # Alternative
-    /// If simulate_transaction is unavailable or unreliable, fallback to solana-test-validator
+    /// If the simulation is too slow, the alternative is to switch to a local Mainnet Fork
+    /// (using solana-test-validator) for faster execution with same accuracy
     pub async fn execute_arbitrage_simulation(
         &self,
         transaction: &Transaction,
@@ -73,9 +89,10 @@ impl TransactionExecutor {
             signer.pubkey()
         );
 
-        // Step 2: Create RpcSimulateTransactionConfig
+        // Step 1: Define the RpcSimulateTransactionConfig
+        // Ensure the simulation is run with the latest blockhash and includes logs
         // - sig_verify: false (faster simulation, we know the signature is valid)
-        // - replace_recent_blockhash: true (use latest blockhash for accuracy)
+        // - replace_recent_blockhash: true (use latest blockhash for accuracy - CRITICAL)
         // - commitment: Processed (fastest feedback, suitable for simulation)
         // - encoding: Base64 (default, efficient)
         // - accounts: None (we don't need account state in response)
@@ -93,14 +110,15 @@ impl TransactionExecutor {
             "Simulation config: sig_verify=false, replace_blockhash=true, commitment=processed"
         );
 
-        // Step 3: Call simulate_transaction with config
+        // Step 2: Call self.rpc_client.simulate_transaction() with the configuration
+        // Using simulate_transaction_with_config for full control over simulation parameters
         match self.rpc_client.simulate_transaction_with_config(transaction, config).await {
             Ok(response) => {
-                // Step 4: Handle successful response
+                // Step 3: Check the simulation result for errors (simulation_result.value.err)
                 let value = response.value;
 
                 if let Some(err) = value.err {
-                    // Simulation failed - log error details
+                    // Step 4: If an error is found, log the error details and the transaction logs
                     error!(
                         "❌ Simulation failed with error: {:?}",
                         err
@@ -112,7 +130,7 @@ impl TransactionExecutor {
                         error!("  Log[{}]: {}", idx, log);
                     }
 
-                    // Step 5: Return failure result
+                    // Return failure result with error details
                     return Ok(SimulationResult {
                         success: false,
                         compute_units_consumed: value.units_consumed.unwrap_or(0),
@@ -121,20 +139,22 @@ impl TransactionExecutor {
                     });
                 }
 
-                // Simulation succeeded - extract logs and compute units
+                // Step 5: If successful, log the success, the units_consumed, and the transaction logs
+                // for manual verification of the arbitrage logic
                 let logs = value.logs.unwrap_or_default();
                 let units_consumed = value.units_consumed.unwrap_or(0);
 
                 info!("✅ Simulation successful!");
-                info!("   Compute units consumed: {}", units_consumed);
+                info!("   Compute units consumed: {} (for priority fee estimation)", units_consumed);
                 
-                // Log transaction details for analysis
+                // Log transaction details for manual verification of arbitrage logic
                 debug!("   Transaction logs ({} entries):", logs.len());
                 for (idx, log) in logs.iter().enumerate() {
                     debug!("     [{}] {}", idx, log);
                 }
 
                 // Validate efficiency - warn if compute usage is high
+                // OPTIMIZE: Log units_consumed to estimate real priority fees
                 if units_consumed > 800_000 {
                     warn!(
                         "⚠️  High compute unit usage: {} (limit is 1.4M)",
@@ -142,7 +162,9 @@ impl TransactionExecutor {
                     );
                 }
 
-                // Step 5: Return success result
+                // Step 6: Return SimulationResult to indicate the simulation process completed successfully
+                // Enhanced version: Returns structured data instead of just Ok(())
+                // This allows caller to inspect success, compute units, logs, and errors
                 Ok(SimulationResult {
                     success: true,
                     compute_units_consumed: units_consumed,
@@ -152,13 +174,16 @@ impl TransactionExecutor {
             }
             Err(e) => {
                 // Step 4: Handle RPC error (network issues, invalid transaction, etc.)
+                // This is different from simulation failure - the RPC call itself failed
                 error!("❌ Simulation RPC call failed: {}", e);
                 error!("   This could indicate:");
                 error!("   - Network connectivity issues");
                 error!("   - Invalid transaction structure");
                 error!("   - RPC node issues");
 
-                // Step 5: Return error result
+                // Step 6: Return error result (simulation process completed, but with RPC error)
+                // Note: We return Ok(SimulationResult) with success=false, not Err()
+                // This indicates the simulation process itself completed, but detected a problem
                 Ok(SimulationResult {
                     success: false,
                     compute_units_consumed: 0,
