@@ -17,6 +17,7 @@ use solana_sdk::{
     signature::{read_keypair_file, Keypair},
     signer::Signer,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -398,6 +399,101 @@ fn load_keypair(wallet_config: &config::WalletConfig) -> Result<Keypair> {
 /// 
 /// Alternative: Use separate binary for simulation and live execution to enforce
 /// separation at the build level (more complex but stronger safety guarantee)
+
+// ============================================================================
+// Feature: Initial Balance Snapshot
+// ============================================================================
+
+/// Get initial token balances for all relevant accounts before transaction execution
+/// 
+/// This function captures a snapshot of token balances that will be compared against
+/// post-execution balances to validate actual profit realization.
+/// 
+/// DECISION: Snapshot all relevant token accounts (Chosen) vs only the profit token.
+/// Chosen: Snapshotting all involved tokens (input, output, fee) provides a complete 
+/// audit trail for the arbitrage.
+/// 
+/// OPTIMIZE: Use the `token_fetcher`'s batching logic to efficiently fetch all initial 
+/// balances in one RPC call.
+/// 
+/// # Arguments
+/// * `rpc_client` - RPC client for blockchain queries
+/// * `wallet_address` - Wallet address to check balances for
+/// * `token_mints` - List of token mints to snapshot
+/// 
+/// # Returns
+/// HashMap<Pubkey, u64> - Map of token mint to balance amount
+async fn get_initial_balances(
+    rpc_client: Arc<RpcClient>,
+    wallet_address: &Pubkey,
+    token_mints: &[Pubkey],
+) -> Result<HashMap<Pubkey, u64>> {
+    info!("📸 Capturing initial balance snapshot for {} tokens", token_mints.len());
+    
+    let mut balances = HashMap::new();
+    
+    // Get all token accounts owned by the wallet
+    let token_accounts = rpc_client
+        .get_token_accounts_by_owner(
+            wallet_address,
+            solana_client::rpc_request::TokenAccountsFilter::ProgramId(
+                spl_token::id(),
+            ),
+        )
+        .await
+        .context("Failed to fetch wallet token accounts")?;
+    
+    debug!("   Found {} token accounts for wallet", token_accounts.len());
+    
+    // Parse each token account and match against requested mints
+    for keyed_account in token_accounts {
+        // Parse the token account data
+        use solana_account_decoder::UiAccountData;
+        if let UiAccountData::Json(parsed_account) = &keyed_account.account.data {
+            if let Some(info) = parsed_account.parsed.get("info") {
+                // Extract mint and amount
+                if let (Some(mint_str), Some(token_amount)) = (
+                    info.get("mint").and_then(|v| v.as_str()),
+                    info.get("tokenAmount"),
+                ) {
+                    if let Ok(mint) = Pubkey::try_from(mint_str) {
+                        // Only record balances for requested mints
+                        if token_mints.contains(&mint) {
+                            let amount = token_amount
+                                .get("amount")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| s.parse::<u64>().ok())
+                                .unwrap_or(0);
+                            
+                            let ui_amount = token_amount
+                                .get("uiAmount")
+                                .and_then(|v| v.as_f64())
+                                .unwrap_or(0.0);
+                            
+                            balances.insert(mint, amount);
+                            debug!("   ✓ {} balance: {} ({:.6})", 
+                                mint, amount, ui_amount);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Check for missing token accounts (zero balances)
+    for mint in token_mints {
+        if !balances.contains_key(mint) {
+            debug!("   ⓘ Token account not found for mint {}, assuming zero balance", mint);
+            balances.insert(*mint, 0);
+        }
+    }
+    
+    info!("✅ Balance snapshot captured: {}/{} tokens", 
+        balances.len(), token_mints.len());
+    
+    Ok(balances)
+}
+
 #[allow(dead_code)]
 async fn execute_arbitrage(
     opportunity: &chain::token_price::ArbitrageOpportunity,
@@ -411,6 +507,31 @@ async fn execute_arbitrage(
     info!("   Sell on {:?} @ {}", opportunity.sell_dex, opportunity.sell_price);
     info!("   Expected gross profit: {} bps", opportunity.gross_profit_bps);
     info!("   Expected net profit: {} bps", opportunity.net_profit_bps);
+
+    // ========================================================================
+    // Step 0: Capture Initial Balance Snapshot
+    // Feature: Initial Balance Snapshot - capture token balances before execution
+    // This enables post-execution profit validation by comparing actual vs expected
+    // ========================================================================
+    let token_mints = vec![
+        opportunity.token_a_mint,
+        opportunity.token_b_mint,
+        // Add wrapped SOL (WSOL) mint for native SOL tracking in token accounts
+        spl_token::native_mint::id(),
+    ];
+    
+    info!("📸 Capturing pre-execution balance snapshot...");
+    let initial_balances = get_initial_balances(
+        Arc::clone(&rpc_client),
+        &payer.pubkey(),
+        &token_mints,
+    )
+    .await?;
+    
+    debug!("   Initial balances captured for {} tokens", initial_balances.len());
+    for (mint, balance) in &initial_balances {
+        debug!("     {}: {}", mint, balance);
+    }
 
     // ========================================================================
     // Step 1: Build Transaction
@@ -434,6 +555,8 @@ async fn execute_arbitrage(
     // ========================================================================
     // Step 2: Execute with Mode Switch (Simulation or Live)
     // Uses config.bot.is_simulation_mode to determine execution mode
+    // 
+    // Feature: Final Execution and Validation Loop
     // ========================================================================
     info!("🎬 Executing transaction in {} mode", 
         if config.bot.is_simulation_mode { "SIMULATION" } else { "LIVE" });
@@ -443,7 +566,13 @@ async fn execute_arbitrage(
         .await?;
 
     // ========================================================================
-    // Step 3: Process and Log Result
+    // Step 3: Process Result and Validate Profit
+    // 
+    // DECISION: Validate profit only after live execution (Chosen) vs after simulation.
+    // Chosen: Profit validation requires a real state change, which only occurs in live mode.
+    // 
+    // OPTIMIZE: If validation fails (loss or zero profit), trigger a circuit breaker
+    // to prevent consecutive bad trades.
     // ========================================================================
     match result {
         chain::ArbitrageExecutionResult::Simulation(sim_result) => {
@@ -454,6 +583,10 @@ async fn execute_arbitrage(
                     config.execution.compute_unit_limit);
                 info!("   Efficiency: {:.1}%", 
                     (sim_result.compute_units_consumed as f64 / config.execution.compute_unit_limit as f64) * 100.0);
+                
+                // Profit validation skipped for simulation mode
+                info!("   ℹ️  Profit validation skipped (simulation mode - no real state change)");
+                info!("   💡 Run in live mode or mainnet fork to validate actual profit");
                 
                 // Log sample of transaction logs for debugging
                 if !sim_result.logs.is_empty() {
@@ -485,8 +618,77 @@ async fn execute_arbitrage(
                 info!("✅ Transaction confirmed on-chain!");
                 info!("   Signature: {}", exec_result.signature);
                 info!("   Slot: {}", exec_result.slot);
-                info!("   💰 Arbitrage executed successfully");
                 
+                // ========================================================================
+                // Step 3a: Validate Actual Profit Realization (Live Mode Only)
+                // ========================================================================
+                info!("🔍 Validating actual profit realization...");
+                
+                // Calculate expected profit percentage from opportunity
+                let expected_profit_pct = opportunity.net_profit_bps as f64 / 100.0;
+                
+                match executor.validate_profit(
+                    &exec_result.signature,
+                    exec_result.slot,
+                    &payer.pubkey(),
+                    Some(expected_profit_pct),
+                ).await {
+                    Ok(validation) => {
+                        info!("✅ Profit validation complete");
+                        info!("   Transaction: {}", validation.signature);
+                        info!("   Slot: {}", validation.slot);
+                        info!("   Fees paid: {:.6} SOL", validation.fees_paid_sol);
+                        
+                        // Log balance changes
+                        if !validation.profit_by_token.is_empty() {
+                            info!("   📊 Token balance changes:");
+                            for token_profit in &validation.profit_by_token {
+                                let symbol = token_profit.symbol.as_deref().unwrap_or("Unknown");
+                                info!("      {}: {:.6} ({:+.2}%)", 
+                                    symbol,
+                                    token_profit.net_change_ui,
+                                    token_profit.percentage_change
+                                );
+                            }
+                        }
+                        
+                        // Check if profit meets expectations
+                        if validation.meets_expectations {
+                            info!("   ✅ Profit meets expectations!");
+                            if let Some(variance) = validation.variance_percentage {
+                                info!("   📈 Variance from expected: {:+.2}%", variance);
+                            }
+                            if let Some(total_profit) = validation.total_profit_usd {
+                                info!("   💰 Total profit: ${:.2}", total_profit);
+                            }
+                        } else {
+                            warn!("   ⚠️  Profit variance exceeds threshold!");
+                            if let Some(variance) = validation.variance_percentage {
+                                warn!("   📉 Variance from expected: {:+.2}%", variance);
+                            }
+                            
+                            // Log all alerts
+                            if !validation.alerts.is_empty() {
+                                warn!("   🚨 Alerts:");
+                                for alert in &validation.alerts {
+                                    warn!("      - {}", alert);
+                                }
+                            }
+                            
+                            // OPTIMIZE: Circuit breaker - pause bot after unexpected loss
+                            warn!("   🛑 CIRCUIT BREAKER: Pausing bot for 60 seconds");
+                            warn!("   💡 Investigate transaction: {}", validation.signature);
+                            tokio::time::sleep(Duration::from_secs(60)).await;
+                        }
+                    }
+                    Err(e) => {
+                        error!("❌ Profit validation failed: {}", e);
+                        error!("   Transaction may have executed but validation unavailable");
+                        error!("   Manual verification recommended for signature: {}", exec_result.signature);
+                    }
+                }
+                
+                info!("   💰 Arbitrage executed successfully");
                 Ok(exec_result.signature)
             } else if let Some(error) = exec_result.error {
                 error!("❌ Transaction failed on-chain");

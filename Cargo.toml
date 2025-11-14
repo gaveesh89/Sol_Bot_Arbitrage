@@ -73,6 +73,9 @@ hyper = "1.0"
 # Retry Logic
 backoff = { version = "0.4", features = ["tokio"] }
 
+# Random Number Generation (for jitter in retry logic)
+rand = "0.8"
+
 # Cryptography
 bs58 = "0.5"
 
