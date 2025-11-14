@@ -232,8 +232,10 @@ impl TransactionExecutor {
         // Submit transaction and wait for confirmation
         match self.rpc_client.send_and_confirm_transaction(transaction).await {
             Ok(signature) => {
+                // Step 1: Log transaction signature immediately after confirmation
                 info!("✅ Transaction confirmed!");
                 info!("   Signature: {}", signature);
+                info!("   Explorer: https://explorer.solana.com/tx/{}", signature);
                 
                 // Fetch transaction details for complete audit trail
                 // Note: Using JSON encoding for transaction details
@@ -276,7 +278,36 @@ impl TransactionExecutor {
                             }
                         }
                         
+                        // Step 2 & 3: Post-Execution Profit Validation
+                        // OPTIMIZE: Include block slot for easy reference when debugging local fork
                         info!("💰 Transaction executed successfully on-chain");
+                        info!("   Block slot: {} (use for fork validation)", slot);
+                        
+                        // TODO: Implement validate_profit function
+                        // Feature: Post-Execution Profit Validation Logging
+                        // 
+                        // The validate_profit function should:
+                        // 1. Capture test wallet token balances BEFORE transaction execution
+                        // 2. Capture test wallet token balances AFTER transaction confirmation
+                        // 3. Calculate actual profit realized on the local fork
+                        // 4. Compare actual profit vs. expected profit from simulation
+                        // 5. Log detailed profit breakdown (tokens in/out, fees paid, net profit)
+                        // 6. Alert if actual profit deviates significantly from expected (>5% variance)
+                        // 
+                        // DECISION: Placeholder log/comment (Chosen) vs full implementation now
+                        // Rationale: Placeholder ensures logging structure is correct and reminds
+                        //            developer of critical next step without blocking current work
+                        // 
+                        // OPTIMIZE: Store slot number for querying specific block state on fork
+                        // 
+                        // Alternative: Use separate monitoring service to track wallet balance changes
+                        // 
+                        // Implementation location: New function in this module
+                        // Call signature: validate_profit(&self, signature, slot, expected_profit).await
+                        //
+                        info!("⚠️  TODO: Call validate_profit() here to verify profit realization");
+                        info!("   Expected: Compare pre/post token balances for test wallet");
+                        info!("   Location: Local fork at slot {}", slot);
                         
                         Ok(ExecutionResult {
                             signature: signature.to_string(),

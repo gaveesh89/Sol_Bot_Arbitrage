@@ -57,6 +57,18 @@ pub struct MintConfig {
 }
 
 /// RPC endpoint configuration
+/// 
+/// Feature: Local Fork Configuration Default
+/// 
+/// Supports multiple network targets:
+/// - Mainnet-Beta (production)
+/// - Devnet (testing)
+/// - Local Fork (development with mainnet state)
+/// 
+/// Priority order for RPC URL selection:
+/// 1. LOCAL_FORK_URL (highest priority - for local testing)
+/// 2. RPC_URL (standard environment variable)
+/// 3. Mainnet-Beta (fallback default)
 #[derive(Debug, Clone, Deserialize)]
 pub struct RpcConfig {
     pub url: String,
@@ -167,9 +179,21 @@ impl Config {
         let mints = Self::load_mint_configs()?;
 
         // RPC configuration
+        // Feature: Local Fork Configuration with Environment Variable Override
+        // 
+        // DECISION: Use environment variable override (Chosen) vs separate config file
+        // Rationale: Environment variables provide the fastest way to switch between
+        //            Mainnet, Devnet, and Local Fork without recompiling or editing files
+        // 
+        // OPTIMIZE: The final RPC URL is logged at startup (in main.rs) to prevent
+        //           confusion during testing and ensure the correct network is being used
+        // 
+        // Alternative: Use a dedicated configuration file (config.toml) for complex
+        //              environment switching with profiles (dev, test, prod)
+        let rpc_url = get_env_or_default_rpc();
         let rpc = RpcConfig {
-            url: std::env::var("RPC_URL").context("RPC_URL not set")?,
-            ws_url: get_env_or_default("RPC_WS_URL", "wss://api.mainnet-beta.solana.com"),
+            url: rpc_url.clone(),
+            ws_url: get_env_or_default_ws_url(&rpc_url),
             backup_urls: parse_string_list(&get_env_or_default("BACKUP_RPC_URLS", "")),
             commitment_level: get_env_or_default("COMMITMENT_LEVEL", "confirmed"),
             timeout_seconds: get_u64_env("RPC_TIMEOUT_SECONDS", 30)?,
@@ -348,6 +372,67 @@ impl Config {
 /// Get environment variable or return default value
 fn get_env_or_default(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Get RPC URL with priority for local fork testing
+/// 
+/// Feature: Smart RPC URL Resolution
+/// 
+/// Priority order:
+/// 1. LOCAL_FORK_URL - Highest priority for local mainnet fork testing
+///    Example: http://localhost:8899
+/// 2. RPC_URL - Standard environment variable for any network
+///    Example: https://api.mainnet-beta.solana.com
+/// 3. Mainnet-Beta - Fallback default if nothing is set
+/// 
+/// This allows seamless switching between:
+/// - Local fork testing (set LOCAL_FORK_URL)
+/// - Devnet testing (set RPC_URL=https://api.devnet.solana.com)
+/// - Mainnet operations (set RPC_URL=<mainnet> or use default)
+fn get_env_or_default_rpc() -> String {
+    // Step 1: Check for LOCAL_FORK_URL (highest priority for testing)
+    if let Ok(fork_url) = std::env::var("LOCAL_FORK_URL") {
+        return fork_url;
+    }
+    
+    // Step 2: Check for standard RPC_URL
+    if let Ok(rpc_url) = std::env::var("RPC_URL") {
+        return rpc_url;
+    }
+    
+    // Step 3: Default to Mainnet-Beta
+    "https://api.mainnet-beta.solana.com".to_string()
+}
+
+/// Get WebSocket URL that matches the RPC endpoint
+/// 
+/// Feature: Automatic WebSocket URL Inference
+/// 
+/// Intelligently determines the correct WebSocket URL based on RPC URL:
+/// - Local fork: ws://localhost:8900
+/// - Devnet: wss://api.devnet.solana.com
+/// - Mainnet: wss://api.mainnet-beta.solana.com
+/// - Custom: Uses RPC_WS_URL if provided
+fn get_env_or_default_ws_url(rpc_url: &str) -> String {
+    // Step 1: Check for explicit WS_URL override
+    if let Ok(ws_url) = std::env::var("RPC_WS_URL") {
+        return ws_url;
+    }
+    
+    // Step 2: Infer WebSocket URL from RPC URL
+    if rpc_url.contains("localhost") || rpc_url.contains("127.0.0.1") {
+        // Local fork: Use standard local WebSocket port
+        "ws://localhost:8900".to_string()
+    } else if rpc_url.contains("devnet") {
+        // Devnet: Use official Devnet WebSocket
+        "wss://api.devnet.solana.com".to_string()
+    } else if rpc_url.contains("testnet") {
+        // Testnet: Use official Testnet WebSocket
+        "wss://api.testnet.solana.com".to_string()
+    } else {
+        // Mainnet or custom: Replace https:// with wss://
+        rpc_url.replace("https://", "wss://").replace("http://", "ws://")
+    }
 }
 
 /// Get boolean environment variable with default
