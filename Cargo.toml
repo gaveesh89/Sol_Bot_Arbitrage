@@ -92,6 +92,7 @@ prometheus = { version = "0.13", optional = true }
 
 # CLI (optional)
 clap = { version = "4.5", features = ["derive"], optional = true }
+tokio-stream = "0.1.17"
 
 [dev-dependencies]
 mockall = "0.12"
@@ -112,6 +113,10 @@ strip = true
 
 [profile.dev]
 opt-level = 0
+
+[lib]
+name = "solana_mev_bot"
+path = "src/lib.rs"
 
 [[bin]]
 name = "mev-bot"

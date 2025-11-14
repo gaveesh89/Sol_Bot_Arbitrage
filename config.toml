@@ -1,0 +1,414 @@
+# Solana MEV Arbitrage Bot - Production Configuration
+# Last updated: November 15, 2025
+
+# ============================================================================
+# Network Configuration
+# ============================================================================
+[network]
+# Primary RPC endpoints (multiple for redundancy)
+rpc_endpoints = [
+    "https://api.mainnet-beta.solana.com",
+    "https://solana-api.projectserum.com",
+    "https://rpc.ankr.com/solana"
+]
+
+# WebSocket URL for real-time pool monitoring
+pubsub_url = "wss://api.mainnet-beta.solana.com"
+
+# Commitment level for transaction confirmation
+# Options: processed, confirmed, finalized
+commitment_level = "confirmed"
+
+# RPC request timeout in seconds
+timeout_seconds = 30
+
+# ============================================================================
+# Arbitrage Detection Settings
+# ============================================================================
+[arbitrage]
+# Minimum profit threshold in basis points (100 bps = 1%)
+# Set higher for mainnet to account for competition
+min_profit_bps = 30  # 0.3% minimum profit
+
+# Maximum slippage tolerance in basis points
+# Lower values = more conservative, fewer opportunities
+max_slippage_bps = 50  # 0.5% maximum slippage
+
+# Maximum number of hops in arbitrage path
+# More hops = more opportunities but higher risk
+max_hops = 4  # 2-4 hop cycles
+
+# Enable multi-hop arbitrage (true recommended)
+enable_multi_hop = true
+
+# Prefer direct routes when available
+prefer_direct_routes = true
+
+# Cache TTL for pool data in milliseconds
+cache_ttl_ms = 1000  # 1 second cache
+
+# Maximum cache size (number of entries)
+cache_max_size = 1000
+
+# ============================================================================
+# Transaction Execution Settings
+# ============================================================================
+[execution]
+# Maximum transaction retry attempts
+max_retries = 3
+
+# Transaction confirmation timeout in milliseconds
+confirmation_timeout_ms = 10000  # 10 seconds
+
+# Maximum compute units to request
+max_compute_units = 400000  # 400k CU (typical: 200-400k)
+
+# Priority fee strategy
+# Percentile of recent fees to use (0-100)
+priority_fee_percentile = 75  # Use 75th percentile
+
+# Base priority fee in micro-lamports per compute unit
+# This is added to the calculated percentile fee
+base_priority_fee = 1000  # 1000 micro-lamports
+
+# Maximum priority fee cap (prevent excessive fees)
+max_priority_fee = 100000  # 100k lamports = 0.0001 SOL
+
+# Enable transaction simulation before sending
+simulate_before_send = true
+
+# Use versioned transactions (recommended for efficiency)
+use_versioned_transactions = true
+
+# Compute unit buffer (added to calculated requirements)
+compute_unit_buffer = 50000  # 50k extra CU for safety
+
+# ============================================================================
+# DEX Configuration
+# ============================================================================
+
+# Raydium AMM v4
+[dex.raydium]
+enabled = true
+program_id = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
+amm_program_id = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
+reliability_score = 95  # 0-100, used for prioritization
+
+# Meteora DAMM (Dynamic AMM)
+[dex.meteora_damm]
+enabled = true
+program_id = "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB"
+reliability_score = 90
+
+# Meteora Vault
+[dex.meteora_vault]
+enabled = true
+program_id = "24Uqj9JCLxUeoC3hGfh5W3s9FM9uCHDS2SG3LYwBpyTi"
+reliability_score = 90
+
+# Orca Whirlpool (Concentrated Liquidity)
+[dex.whirlpool]
+enabled = true
+program_id = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"
+reliability_score = 95
+
+# Orca v1 (Legacy)
+[dex.orca]
+enabled = true
+program_id = "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP"
+reliability_score = 90
+
+# Pump.fun (Bonding Curve DEX)
+[dex.pump]
+enabled = false  # Disabled by default (higher risk)
+program_id = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
+reliability_score = 70
+
+# ============================================================================
+# Token Configuration
+# ============================================================================
+[tokens]
+# Base tokens to start arbitrage cycles from
+# These should be high-liquidity tokens
+base_tokens = [
+    "So11111111111111111111111111111111111111112",   # SOL (wrapped)
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", # USDC
+    "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"  # USDT
+]
+
+# Minimum liquidity threshold in USD
+# Pools below this threshold are ignored
+min_pool_liquidity_usd = 10000  # $10k minimum
+
+# ============================================================================
+# Wallet Configuration
+# ============================================================================
+[wallet]
+# Path to keypair file (relative or absolute)
+# Can be overridden with WALLET_KEYPAIR_PATH environment variable
+keypair_path = "./wallet.json"
+
+# Minimum SOL balance to maintain (for fees)
+min_balance_sol = 0.1  # Keep at least 0.1 SOL
+
+# Enable balance monitoring and alerts
+balance_monitoring = true
+
+# ============================================================================
+# Monitoring & Metrics
+# ============================================================================
+[monitoring]
+# Enable Prometheus metrics exporter
+enable_metrics = true
+
+# Prometheus metrics HTTP server port
+metrics_port = 9090
+
+# Metrics update interval in seconds
+metrics_interval_seconds = 60
+
+# Log level: trace, debug, info, warn, error
+log_level = "info"
+
+# Enable performance tracking
+enable_performance_tracking = true
+
+# Price check interval in milliseconds
+price_check_interval_ms = 1000  # Check every 1 second
+
+# Minimum price change to trigger arbitrage calculation (bps)
+price_change_threshold_bps = 10  # 0.1% price change
+
+# Enable detailed transaction logging
+detailed_tx_logging = true
+
+# ============================================================================
+# Risk Management
+# ============================================================================
+[risk]
+# Maximum position size per trade in SOL
+max_position_size_sol = 10.0  # 10 SOL max per trade
+
+# Maximum daily loss threshold in SOL
+# Bot stops trading if this is exceeded
+max_daily_loss_sol = 50.0  # Stop after 50 SOL loss
+
+# Circuit breaker: emergency stop threshold
+# Triggers immediate shutdown if single trade loses this much
+circuit_breaker_loss_threshold = 5.0  # 5 SOL per trade
+
+# Maximum number of failed transactions before pause
+max_consecutive_failures = 5
+
+# Pause duration after consecutive failures (seconds)
+failure_pause_duration_seconds = 300  # 5 minutes
+
+# Enable front-run detection
+enable_frontrun_detection = true
+
+# Front-run detection threshold (profit ratio)
+# If actual profit < expected * threshold, flag as front-run
+frontrun_detection_threshold = 0.5  # 50% of expected
+
+# Risk level thresholds
+[risk.levels]
+# Opportunity risk scoring thresholds
+low_risk_min_profit_bps = 100      # 1% profit = low risk
+low_risk_max_hops = 3              # Up to 3 hops = low risk
+medium_risk_min_profit_bps = 50    # 0.5% profit = medium risk
+medium_risk_max_hops = 4           # Up to 4 hops = medium risk
+# Everything else is considered high risk
+
+# ============================================================================
+# Bot Behavior
+# ============================================================================
+[bot]
+# Enable arbitrage detection and execution
+enable_arbitrage = true
+
+# Enable sandwich attack detection (not execution - for defense)
+enable_sandwich_detection = true
+
+# Execution mode: true = simulation only, false = live trading
+# IMPORTANT: Start with simulation mode for testing!
+is_simulation_mode = true  # Set to false for live execution
+
+# Maximum transaction attempts per opportunity
+max_transaction_attempts = 2
+
+# Delay between retry attempts in milliseconds
+retry_delay_ms = 100
+
+# ============================================================================
+# Pool Monitoring
+# ============================================================================
+[pool_monitoring]
+# Enable real-time WebSocket pool monitoring
+enabled = true
+
+# Detection rate limit in milliseconds
+# Minimum time between detection runs
+detection_rate_limit_ms = 1000  # 1 second
+
+# Maximum reconnection attempts for WebSocket
+max_reconnect_attempts = 10
+
+# Reconnection delay in milliseconds
+reconnect_delay_ms = 2000  # 2 seconds
+
+# Subscription batch size
+# Number of pools to subscribe to at once
+subscription_batch_size = 50
+
+# ============================================================================
+# Flash Loan Configuration (Future Feature)
+# ============================================================================
+[flashloan]
+# Enable flash loan integration (not yet implemented)
+enabled = false
+
+# Flash loan provider
+provider = "solend"  # Options: solend, marginfi, etc.
+
+# Maximum flash loan amount in SOL
+max_loan_amount = 1000.0
+
+# Flash loan fee in basis points
+fee_bps = 30  # 0.3% typical fee
+
+# ============================================================================
+# Advanced Settings
+# ============================================================================
+[advanced]
+# Enable Address Lookup Tables for transaction compression
+enable_lookup_tables = true
+
+# Lookup table addresses (add as needed)
+lookup_tables = []
+
+# Enable transaction spamming (send to multiple RPCs)
+enable_transaction_spam = true
+
+# Number of simultaneous transaction submissions
+spam_submissions = 3
+
+# Delay between spam submissions in milliseconds
+spam_delay_ms = 10
+
+# Use different RPCs for spam submissions
+spam_use_different_rpcs = true
+
+# Graph update strategy: "immediate" or "batched"
+graph_update_strategy = "immediate"
+
+# Batch update interval in milliseconds (if batched)
+batch_update_interval_ms = 100
+
+# Enable parallel detection across multiple base tokens
+parallel_detection = true
+
+# Number of detection worker threads
+detection_workers = 4
+
+# ============================================================================
+# Cache Configuration
+# ============================================================================
+[cache]
+# Cache time-to-live in seconds
+ttl_seconds = 5
+
+# Maximum cache size (number of entries)
+max_size = 1000
+
+# Enable pool data caching
+enable_pool_cache = true
+
+# Enable account data caching
+enable_account_cache = true
+
+# Enable route caching
+enable_route_cache = true
+
+# Route cache TTL in seconds
+route_cache_ttl_seconds = 300  # 5 minutes
+
+# ============================================================================
+# Alert Configuration (Future Feature)
+# ============================================================================
+[alerts]
+# Enable alerting system
+enabled = false
+
+# Discord webhook URL for alerts
+discord_webhook_url = ""
+
+# Telegram bot token and chat ID
+telegram_bot_token = ""
+telegram_chat_id = ""
+
+# Alert on these events
+alert_on_error = true
+alert_on_large_profit = true  # Profit > 1 SOL
+alert_on_frontrun = true
+alert_on_circuit_breaker = true
+
+# ============================================================================
+# Development & Testing
+# ============================================================================
+[development]
+# Enable development mode features
+dev_mode = false
+
+# Use devnet instead of mainnet
+use_devnet = false
+
+# Devnet RPC endpoints
+devnet_rpc_url = "https://api.devnet.solana.com"
+devnet_ws_url = "wss://api.devnet.solana.com"
+
+# Enable additional debug logging
+debug_logging = false
+
+# Dry run mode (simulate everything, never send transactions)
+dry_run = false
+
+# Transaction simulation always returns success
+mock_success = false
+
+# ============================================================================
+# Notes
+# ============================================================================
+# 
+# Configuration Priority (highest to lowest):
+# 1. Environment variables
+# 2. This config file (config.toml)
+# 3. Default values in code
+#
+# Environment Variable Format:
+# - Section.key format: NETWORK_RPC_ENDPOINTS, BOT_IS_SIMULATION_MODE
+# - Use underscores to separate words
+# - Arrays use comma separation: "url1,url2,url3"
+#
+# Quick Start:
+# 1. Copy this file to config.toml
+# 2. Update wallet.keypair_path with your keypair location
+# 3. Set bot.is_simulation_mode = true for testing
+# 4. Run: cargo run --release --bin mev-bot
+# 5. Monitor metrics and logs
+# 6. When ready: set bot.is_simulation_mode = false
+#
+# Safety Recommendations:
+# - Start with is_simulation_mode = true
+# - Test on devnet first (development.use_devnet = true)
+# - Use conservative risk limits initially
+# - Monitor for at least 24 hours in simulation
+# - Gradually increase position sizes
+# - Always maintain sufficient SOL for fees
+#
+# Performance Tuning:
+# - Increase detection_workers for more CPU cores
+# - Lower cache_ttl_ms for more frequent updates
+# - Increase spam_submissions for better latency
+# - Adjust priority_fee_percentile based on network congestion
+#
+# ============================================================================
