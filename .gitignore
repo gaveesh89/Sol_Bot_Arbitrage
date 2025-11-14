@@ -28,9 +28,29 @@ logs/
 dist/
 build/
 
-# Keypairs (IMPORTANT: Never commit private keys!)
+# Keypairs and Private Keys (CRITICAL: Never commit these!)
 *.json
 !package.json
+!Cargo.json
+!tsconfig.json
+!idl.json
 *.key
+*.pem
 wallet.json
 keypair.json
+id.json
+authority.json
+deployer.json
+
+# Environment files with secrets
+.env
+.env.local
+.env.*.local
+.env.production
+.env.development
+
+# API Keys and Tokens
+*_token.txt
+*_api_key.txt
+secrets/
+credentials/

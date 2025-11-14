@@ -313,20 +313,73 @@ async fn main() -> Result<()> {
 }
 
 /// Load wallet keypair from file or environment variable
+/// 
+/// SECURITY: This function loads sensitive cryptographic material. Never:
+/// 1. Log the private key or keypair bytes
+/// 2. Store keypair in unsecured memory longer than necessary
+/// 3. Hardcode private keys in source code
+/// 4. Commit keypair files to version control
+/// 
+/// Priority: Keypair file first (more secure), then environment variable as fallback
 fn load_keypair(wallet_config: &config::WalletConfig) -> Result<Keypair> {
     if let Some(ref keypair_path) = wallet_config.keypair_path {
+        // Method 1: Load from file (Recommended)
         info!("Loading keypair from file: {}", keypair_path);
+        
+        // Security check: Verify file permissions on Unix systems
+        #[cfg(unix)]
+        {
+            use std::fs::metadata;
+            use std::os::unix::fs::PermissionsExt;
+            
+            if let Ok(meta) = metadata(keypair_path) {
+                let mode = meta.permissions().mode();
+                let perms = mode & 0o777;
+                
+                // Warn if file is too permissive (should be 600 or 400)
+                if perms != 0o600 && perms != 0o400 {
+                    warn!(
+                        "Keypair file has insecure permissions: {:o}. Recommended: 600 (rw-------)",
+                        perms
+                    );
+                    warn!("Fix with: chmod 600 {}", keypair_path);
+                }
+            }
+        }
+        
         read_keypair_file(keypair_path)
             .map_err(|e| anyhow::anyhow!("Failed to read keypair file: {}", e))
     } else if let Some(ref private_key) = wallet_config.private_key {
+        // Method 2: Load from environment variable (Alternative)
         info!("Loading keypair from environment variable");
+        
+        // Security: Validate private key format before decoding
+        if private_key.is_empty() {
+            return Err(anyhow::anyhow!("WALLET_PRIVATE_KEY is empty"));
+        }
+        
+        if private_key.len() < 32 || private_key.len() > 88 {
+            return Err(anyhow::anyhow!(
+                "WALLET_PRIVATE_KEY has invalid length. Expected base58 encoded 64-byte key"
+            ));
+        }
+        
         let decoded = bs58::decode(private_key)
             .into_vec()
-            .context("Failed to decode base58 private key")?;
+            .context("Failed to decode base58 private key. Ensure it's properly encoded")?;
+        
+        // Validate decoded key length (should be 64 bytes for Ed25519 keypair)
+        if decoded.len() != 64 {
+            return Err(anyhow::anyhow!(
+                "Decoded private key has invalid length: {} bytes. Expected 64 bytes",
+                decoded.len()
+            ));
+        }
+        
         Keypair::from_bytes(&decoded).context("Failed to create keypair from bytes")
     } else {
         Err(anyhow::anyhow!(
-            "No wallet configuration found. Set WALLET_KEYPAIR_PATH or WALLET_PRIVATE_KEY"
+            "No wallet configuration found. Set WALLET_KEYPAIR_PATH or WALLET_PRIVATE_KEY environment variable. See SECURITY.md for setup instructions"
         ))
     }
 }
