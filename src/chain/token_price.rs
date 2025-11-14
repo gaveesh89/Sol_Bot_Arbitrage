@@ -8,6 +8,31 @@ use tokio::time;
 use tracing::{debug, error, info};
 
 use super::token_fetch::{DexType, PoolData, TokenFetcher};
+use super::constants::USDC_MINT;
+
+// Feature: Base Currency Definition for Profit Calculation
+// 
+// Tasks (in order):
+// 1. Define a constant `BASE_CURRENCY_MINT` using the newly defined `USDC_MINT` constant from `constants.rs`.
+// 2. Ensure all final profit calculations are normalized to this `BASE_CURRENCY_MINT`.
+//
+// DECISION: Use USDC (Chosen) vs SOL.
+// Chosen: USDC is the standard stablecoin for measuring profit, as it removes
+//         volatility from the profit metric. SOL price fluctuates significantly,
+//         making it harder to assess true profitability.
+//
+// OPTIMIZE: Implement price oracle lookup to convert the final profit token
+//           (if not USDC) into USDC value. This enables accurate cross-token
+//           profit comparison.
+//
+// Alternative: Use SOL as the base currency
+//             - Pros: Native token, no conversion needed for SOL pairs
+//             - Cons: Price volatility makes profit assessment harder
+//             - Cons: Difficult to compare with external benchmarks
+
+/// Base currency for profit normalization (USDC)
+/// All profit calculations should be normalized to this currency for consistent comparison
+pub const BASE_CURRENCY_MINT: Pubkey = USDC_MINT;
 
 /// Token price from external source (CEX API or on-chain oracle)
 #[derive(Debug, Clone)]
@@ -57,6 +82,10 @@ pub struct ArbitrageOpportunity {
     pub token_b_mint: Pubkey,
     pub recommended_amount: u64,
     pub execution_risk: RiskLevel,
+    /// The token in which profit is denominated (usually the quote token)
+    pub profit_token: Pubkey,
+    /// Profit normalized to BASE_CURRENCY_MINT (USDC) for consistent comparison
+    pub profit_in_base_currency_bps: Option<i64>,
 }
 
 /// Risk level for arbitrage execution
@@ -289,6 +318,11 @@ impl MarketDataFetcher {
                     total_slippage_bps,
                 );
 
+                // Determine profit token (typically the quote token in the pair)
+                // For pairs like TOKEN/USDC, profit is in USDC
+                // For pairs like TOKEN/SOL, profit is in SOL
+                let profit_token = Self::determine_profit_token(token_a, token_b);
+
                 let opportunity = ArbitrageOpportunity {
                     buy_dex: buy_info.dex_type.clone(),
                     buy_pool: buy_info.pool_address,
@@ -304,6 +338,8 @@ impl MarketDataFetcher {
                     token_b_mint: token_b,
                     recommended_amount,
                     execution_risk,
+                    profit_token,
+                    profit_in_base_currency_bps: None, // Will be populated by normalization
                 };
 
                 info!(
@@ -382,6 +418,65 @@ impl MarketDataFetcher {
     /// Estimate slippage (public method)
     pub fn estimate_slippage(&self, pool_data: &PoolData, trade_amount: u64) -> f64 {
         Self::estimate_slippage_static(pool_data, trade_amount)
+    }
+
+    /// Determine which token in a pair is the profit token (quote currency)
+    /// 
+    /// OPTIMIZE: Price oracle lookup to identify quote tokens
+    /// Priority order: USDC > USDT > WSOL > other
+    fn determine_profit_token(token_a: Pubkey, token_b: Pubkey) -> Pubkey {
+        use super::constants::{USDC_MINT, USDT_MINT, WSOL_MINT};
+        
+        // If one token is USDC, that's the profit token
+        if token_a == USDC_MINT {
+            return token_a;
+        }
+        if token_b == USDC_MINT {
+            return token_b;
+        }
+        
+        // If one token is USDT, that's the profit token
+        if token_a == USDT_MINT {
+            return token_a;
+        }
+        if token_b == USDT_MINT {
+            return token_b;
+        }
+        
+        // If one token is WSOL, that's the profit token
+        if token_a == WSOL_MINT {
+            return token_a;
+        }
+        if token_b == WSOL_MINT {
+            return token_b;
+        }
+        
+        // Default to token_b as profit token
+        token_b
+    }
+
+    /// Normalize profit to BASE_CURRENCY_MINT (USDC)
+    /// 
+    /// OPTIMIZE: Implement price oracle lookup to convert profit to USDC value
+    /// This enables accurate cross-token profit comparison
+    /// 
+    /// Current implementation: Returns original profit if already in USDC,
+    /// otherwise returns None (placeholder for future oracle integration)
+    pub fn normalize_profit_to_base_currency(
+        &self,
+        profit_token: Pubkey,
+        profit_bps: i64,
+    ) -> Option<i64> {
+        // If profit is already in base currency (USDC), return as-is
+        if profit_token == BASE_CURRENCY_MINT {
+            return Some(profit_bps);
+        }
+        
+        // TODO: Implement price oracle lookup
+        // For now, return None to indicate normalization not yet implemented
+        // Future: Query Pyth, Switchboard, or Jupiter price feeds
+        // to convert profit_token amount to USDC equivalent
+        None
     }
 }
 
@@ -561,6 +656,8 @@ mod tests {
             token_b_mint: Pubkey::new_unique(),
             recommended_amount: 1_000_000_000, // 1 SOL
             execution_risk: RiskLevel::Low,
+            profit_token: BASE_CURRENCY_MINT, // Default to USDC for tests
+            profit_in_base_currency_bps: Some(net_profit_bps), // Already in USDC
         }
     }
 
@@ -869,6 +966,63 @@ mod tests {
         assert!(
             dust_opp.recommended_amount < min_trade_amount,
             "Dust amounts should be filtered out"
+        );
+    }
+
+    /// Test 11: Base Currency Profit Token Determination
+    /// Validates that profit token is correctly identified based on priority
+    #[test]
+    fn test_profit_token_determination() {
+        use crate::chain::constants::{USDC_MINT, USDT_MINT, WSOL_MINT};
+
+        let random_token = Pubkey::new_unique();
+
+        // Test Case 1: USDC has highest priority
+        let profit_usdc_a = MarketDataFetcher::determine_profit_token(USDC_MINT, random_token);
+        assert_eq!(profit_usdc_a, USDC_MINT, "USDC should be profit token when in pair");
+
+        let profit_usdc_b = MarketDataFetcher::determine_profit_token(random_token, USDC_MINT);
+        assert_eq!(profit_usdc_b, USDC_MINT, "USDC should be profit token regardless of position");
+
+        // Test Case 2: USDT has second priority (when USDC not present)
+        let profit_usdt_a = MarketDataFetcher::determine_profit_token(USDT_MINT, random_token);
+        assert_eq!(profit_usdt_a, USDT_MINT, "USDT should be profit token when USDC not present");
+
+        // Test Case 3: USDC takes priority over USDT
+        let profit_usdc_over_usdt = MarketDataFetcher::determine_profit_token(USDC_MINT, USDT_MINT);
+        assert_eq!(profit_usdc_over_usdt, USDC_MINT, "USDC should take priority over USDT");
+
+        // Test Case 4: WSOL has third priority
+        let profit_wsol = MarketDataFetcher::determine_profit_token(WSOL_MINT, random_token);
+        assert_eq!(profit_wsol, WSOL_MINT, "WSOL should be profit token when stables not present");
+
+        // Test Case 5: USDT takes priority over WSOL
+        let profit_usdt_over_wsol = MarketDataFetcher::determine_profit_token(USDT_MINT, WSOL_MINT);
+        assert_eq!(profit_usdt_over_wsol, USDT_MINT, "USDT should take priority over WSOL");
+
+        // Test Case 6: Default to token_b when neither is a known quote token
+        let random_token_2 = Pubkey::new_unique();
+        let profit_default = MarketDataFetcher::determine_profit_token(random_token, random_token_2);
+        assert_eq!(profit_default, random_token_2, "Should default to token_b");
+    }
+
+    /// Test 12: Base Currency Constant Validation
+    /// Validates that BASE_CURRENCY_MINT is set to USDC
+    #[test]
+    fn test_base_currency_constant() {
+        use crate::chain::constants::USDC_MINT;
+
+        assert_eq!(
+            BASE_CURRENCY_MINT,
+            USDC_MINT,
+            "BASE_CURRENCY_MINT should be set to USDC"
+        );
+
+        // Verify it's a valid pubkey (not default/zero)
+        assert_ne!(
+            BASE_CURRENCY_MINT,
+            Pubkey::default(),
+            "BASE_CURRENCY_MINT should not be default pubkey"
         );
     }
 }

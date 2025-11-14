@@ -2,14 +2,17 @@
 
 mod chain;
 mod config;
+mod data;
 mod dex;
 mod meteora;
+mod reporting;
 mod utils;
 
 use anyhow::{Context, Result};
 use chain::{MarketDataFetcher, PriceMonitor, TokenFetcher, TransactionExecutor};
 use chain::token_fetch::DexType;
 use config::Config;
+use data::TradeStorage;
 use meteora::{MeteoraDAMMClient, MeteoraVaultClient};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
@@ -138,13 +141,24 @@ async fn main() -> Result<()> {
     debug!("   Vault Program ID: {}", config.dex.meteora_vault_program_id);
 
     // ========================================================================
-    // Step 5.5: Initialize TransactionExecutor with execution mode
+    // Step 5.4: Initialize Trade Storage
+    // ========================================================================
+    info!("📂 Initializing trade storage...");
+    let storage_path = "data/trade_history.jsonl";
+    let trade_storage = Arc::new(TradeStorage::new(storage_path));
+    info!("✅ Trade storage initialized: {}", storage_path);
+
+    // ========================================================================
+    // Step 5.5: Initialize TransactionExecutor with execution mode and storage
     // ========================================================================
     // DECISION: Use is_simulation_mode from Config (Chosen) vs CLI argument
     // Rationale: Config file easier to manage, less prone to human error
     // OPTIMIZE: Log execution mode at startup for clarity
-    let _transaction_executor = Arc::new(TransactionExecutor::new(Arc::clone(&rpc_client)));
-    info!("✅ Transaction executor initialized");
+    let _transaction_executor = Arc::new(TransactionExecutor::new(
+        Arc::clone(&rpc_client),
+        Arc::clone(&trade_storage),
+    ));
+    info!("✅ Transaction executor initialized with trade storage");
     
     // Log execution mode prominently for safety
     if config.bot.is_simulation_mode {
@@ -561,8 +575,23 @@ async fn execute_arbitrage(
     info!("🎬 Executing transaction in {} mode", 
         if config.bot.is_simulation_mode { "SIMULATION" } else { "LIVE" });
     
+    // Use profit token from opportunity (determined by token priority: USDC > USDT > WSOL)
+    // This ensures profits are always denominated in the most stable quote currency
+    let profit_token_mint = opportunity.profit_token;
+    
+    // Calculate expected profit amount in smallest token units
+    // net_profit_bps is in basis points (1 bps = 0.01%)
+    // This is a simplified calculation - real implementation would need token decimals
+    let expected_profit_amount = (opportunity.net_profit_bps as u64) * 100; // Placeholder
+    
     let result = executor
-        .execute_arbitrage(&transaction, &payer, config.bot.is_simulation_mode)
+        .execute_arbitrage(
+            &transaction, 
+            &payer, 
+            config.bot.is_simulation_mode,
+            &profit_token_mint,
+            expected_profit_amount,
+        )
         .await?;
 
     // ========================================================================

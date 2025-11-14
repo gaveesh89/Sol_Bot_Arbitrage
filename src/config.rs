@@ -3,6 +3,9 @@ use serde::Deserialize;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 
+// Import well-known token mint constants
+use crate::chain::{USDC_MINT, USDT_MINT, WSOL_MINT};
+
 /// Main configuration struct containing all bot settings
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -319,49 +322,104 @@ impl Config {
         // If no mints found, load default common tokens
         if mints.is_empty() {
             mints = Self::load_default_mints()?;
+        } else {
+            // Validate user-provided mint configurations
+            Self::validate_mint_configs(&mints)?;
         }
 
         Ok(mints)
     }
 
     /// Load default mint configurations for common tokens
+    /// 
+    /// Feature: Default Token Configuration
+    /// 
+    /// Tasks (in order):
+    /// 1. Use constants from chain::constants for well-known token mints (USDC, USDT, WSOL)
+    /// 2. Allow environment variable overrides for flexibility
+    /// 3. Validate that configured mints are valid Pubkeys
+    /// 
+    /// DECISION: Hardcode defaults in config.rs (Chosen) vs relying solely on .env
+    /// Chosen: Providing robust defaults ensures the bot has a working configuration
+    ///         out of the box, which is a good practice for production systems.
+    /// 
+    /// OPTIMIZE: Added helper function validate_mint_config() to validate that
+    ///           configured mints are valid Pubkeys upon loading.
+    /// 
+    /// Alternative: Require the user to manually add addresses to .env file
+    ///             (less user-friendly, more error-prone)
     fn load_default_mints() -> Result<Vec<MintConfig>> {
         let mut mints = Vec::new();
 
-        // SOL (Wrapped SOL)
-        if let Ok(sol) = parse_pubkey_optional("SOL_MINT") {
-            mints.push(MintConfig {
-                address: sol,
-                symbol: "SOL".to_string(),
-                decimals: 9,
-                pools: vec![],
-                is_quote: true,
-            });
-        }
+        // WSOL (Wrapped SOL) - Use constant as default, allow override
+        let wsol_address = parse_pubkey_optional("SOL_MINT").unwrap_or(WSOL_MINT);
+        mints.push(MintConfig {
+            address: wsol_address,
+            symbol: "SOL".to_string(),
+            decimals: 9,
+            pools: vec![],
+            is_quote: true,
+        });
 
-        // USDC
-        if let Ok(usdc) = parse_pubkey_optional("USDC_MINT") {
-            mints.push(MintConfig {
-                address: usdc,
-                symbol: "USDC".to_string(),
-                decimals: 6,
-                pools: vec![],
-                is_quote: true,
-            });
-        }
+        // USDC - Use constant as default, allow override
+        let usdc_address = parse_pubkey_optional("USDC_MINT").unwrap_or(USDC_MINT);
+        mints.push(MintConfig {
+            address: usdc_address,
+            symbol: "USDC".to_string(),
+            decimals: 6,
+            pools: vec![],
+            is_quote: true,
+        });
 
-        // USDT
-        if let Ok(usdt) = parse_pubkey_optional("USDT_MINT") {
-            mints.push(MintConfig {
-                address: usdt,
-                symbol: "USDT".to_string(),
-                decimals: 6,
-                pools: vec![],
-                is_quote: true,
-            });
-        }
+        // USDT - Use constant as default, allow override
+        let usdt_address = parse_pubkey_optional("USDT_MINT").unwrap_or(USDT_MINT);
+        mints.push(MintConfig {
+            address: usdt_address,
+            symbol: "USDT".to_string(),
+            decimals: 6,
+            pools: vec![],
+            is_quote: true,
+        });
+
+        // Validate all mint configurations
+        Self::validate_mint_configs(&mints)?;
 
         Ok(mints)
+    }
+
+    /// Validate mint configurations to ensure all addresses are valid
+    /// 
+    /// OPTIMIZE: Helper function to validate configured mints are valid Pubkeys
+    ///           Catches configuration errors at startup rather than during runtime
+    fn validate_mint_configs(mints: &[MintConfig]) -> Result<()> {
+        for mint in mints {
+            // Verify the address is not a default/zero pubkey
+            if mint.address == Pubkey::default() {
+                anyhow::bail!(
+                    "Invalid mint configuration: {} has default/zero pubkey",
+                    mint.symbol
+                );
+            }
+
+            // Verify decimals are reasonable (0-18)
+            if mint.decimals > 18 {
+                anyhow::bail!(
+                    "Invalid mint configuration: {} has invalid decimals ({})",
+                    mint.symbol,
+                    mint.decimals
+                );
+            }
+
+            // Log validation success
+            tracing::debug!(
+                "✓ Validated mint: {} ({}) with {} decimals",
+                mint.symbol,
+                mint.address,
+                mint.decimals
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -517,5 +575,79 @@ mod tests {
             pubkey.to_string(),
             "So11111111111111111111111111111111111111112"
         );
+    }
+
+    #[test]
+    fn test_default_mints_use_constants() {
+        // Test that default mints use the hardcoded constants
+        let mints = Config::load_default_mints().unwrap();
+        
+        assert_eq!(mints.len(), 3, "Should have 3 default mints");
+        
+        // Check WSOL
+        let wsol = mints.iter().find(|m| m.symbol == "SOL").unwrap();
+        assert_eq!(wsol.address, WSOL_MINT);
+        assert_eq!(wsol.decimals, 9);
+        assert_eq!(wsol.is_quote, true);
+        
+        // Check USDC
+        let usdc = mints.iter().find(|m| m.symbol == "USDC").unwrap();
+        assert_eq!(usdc.address, USDC_MINT);
+        assert_eq!(usdc.decimals, 6);
+        assert_eq!(usdc.is_quote, true);
+        
+        // Check USDT
+        let usdt = mints.iter().find(|m| m.symbol == "USDT").unwrap();
+        assert_eq!(usdt.address, USDT_MINT);
+        assert_eq!(usdt.decimals, 6);
+        assert_eq!(usdt.is_quote, true);
+    }
+
+    #[test]
+    fn test_mint_validation_rejects_invalid() {
+        let invalid_mints = vec![
+            MintConfig {
+                address: Pubkey::default(), // Invalid: default pubkey
+                symbol: "INVALID".to_string(),
+                decimals: 6,
+                pools: vec![],
+                is_quote: false,
+            }
+        ];
+        
+        let result = Config::validate_mint_configs(&invalid_mints);
+        assert!(result.is_err(), "Should reject default pubkey");
+    }
+
+    #[test]
+    fn test_mint_validation_rejects_excessive_decimals() {
+        let invalid_mints = vec![
+            MintConfig {
+                address: USDC_MINT,
+                symbol: "INVALID".to_string(),
+                decimals: 25, // Invalid: too many decimals
+                pools: vec![],
+                is_quote: false,
+            }
+        ];
+        
+        let result = Config::validate_mint_configs(&invalid_mints);
+        assert!(result.is_err(), "Should reject excessive decimals");
+    }
+
+    #[test]
+    fn test_mint_validation_accepts_valid() {
+        let valid_mints = vec![
+            MintConfig {
+                address: USDC_MINT,
+                symbol: "USDC".to_string(),
+                decimals: 6,
+                pools: vec![],
+                is_quote: true,
+            }
+        ];
+        
+        let result = Config::validate_mint_configs(&valid_mints);
+        assert!(result.is_ok(), "Should accept valid mint config");
     }
 }

@@ -12,7 +12,10 @@ use solana_sdk::{
 };
 use std::sync::Arc;
 use std::str::FromStr;
+use std::time::Instant;
 use tracing::{debug, error, info, warn};
+
+use crate::data::{TradeRecord, TradeStorage};
 
 /// Transaction executor for arbitrage operations
 /// 
@@ -25,6 +28,7 @@ use tracing::{debug, error, info, warn};
 /// spending real money, making it ideal for testing and validation.
 pub struct TransactionExecutor {
     rpc_client: Arc<RpcClient>,
+    storage: Arc<TradeStorage>,
 }
 
 impl TransactionExecutor {
@@ -32,12 +36,16 @@ impl TransactionExecutor {
     /// 
     /// # Arguments
     /// * `rpc_client` - Shared RPC client for Solana network communication
+    /// * `storage` - Shared storage for persisting trade records
     /// 
     /// # Returns
     /// A new TransactionExecutor instance
-    pub fn new(rpc_client: Arc<RpcClient>) -> Self {
-        info!("Initializing TransactionExecutor");
-        Self { rpc_client }
+    pub fn new(rpc_client: Arc<RpcClient>, storage: Arc<TradeStorage>) -> Self {
+        info!("Initializing TransactionExecutor with trade storage");
+        Self { 
+            rpc_client,
+            storage,
+        }
     }
 
     /// Execute arbitrage transaction in simulation mode (zero-risk testing)
@@ -543,20 +551,130 @@ impl TransactionExecutor {
     /// # Safety
     /// Always check is_simulation_mode flag before calling this method.
     /// Default should be true to prevent accidental live execution.
+    /// Execute arbitrage with unified interface (simulation or live)
+    /// 
+    /// Feature: Unified Execution Interface with Trade Recording
+    /// 
+    /// This method provides a single entry point for both simulation and live execution,
+    /// automatically recording all trade attempts (both successful and failed) for
+    /// historical analysis and debugging.
+    /// 
+    /// # Arguments
+    /// * `transaction` - The transaction to execute
+    /// * `signer` - The keypair that signed the transaction
+    /// * `is_simulation_mode` - If true, simulates; if false, executes live
+    /// * `profit_token_mint` - Token mint address for profit tracking
+    /// * `expected_profit_amount` - Expected profit in smallest token units
+    /// 
+    /// # Returns
+    /// Result containing execution outcome (simulation or live)
+    /// 
+    /// # Design Choice
+    /// DECISION: Store all attempts (Chosen) vs only successful trades
+    /// Rationale: Recording failed attempts is crucial for debugging and identifying
+    ///            common failure modes (risk management best practice)
+    /// 
+    /// # Optimization
+    /// OPTIMIZE: Calculate and store latency_ms (time from start to completion)
+    ///           to track execution speed and identify performance bottlenecks
     pub async fn execute_arbitrage(
         &self,
         transaction: &Transaction,
         signer: &Keypair,
         is_simulation_mode: bool,
+        profit_token_mint: &Pubkey,
+        expected_profit_amount: u64,
     ) -> Result<ArbitrageExecutionResult> {
+        // Start timing for latency tracking
+        let start_time = Instant::now();
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        
+        let execution_mode = if is_simulation_mode { "SIMULATION" } else { "LIVE" };
+        
         if is_simulation_mode {
             info!("🧪 Execution mode: SIMULATION (zero-risk)");
             let result = self.execute_arbitrage_simulation(transaction, signer).await?;
+            
+            // Calculate latency
+            let latency_ms = start_time.elapsed().as_millis() as u64;
+            
+            // Create trade record for simulation
+            let trade_record = if result.success {
+                // Simulation succeeded - record as successful but with zero actual profit
+                // (since this was just a simulation, no real tokens moved)
+                TradeRecord::success(
+                    timestamp,
+                    "SIMULATION".to_string(), // No real signature for simulation
+                    profit_token_mint.to_string(),
+                    0, // No actual profit in simulation
+                    expected_profit_amount,
+                    latency_ms,
+                    execution_mode.to_string(),
+                )
+            } else {
+                // Simulation failed
+                TradeRecord::failure(
+                    timestamp,
+                    profit_token_mint.to_string(),
+                    expected_profit_amount,
+                    latency_ms,
+                    execution_mode.to_string(),
+                    result.error.clone().unwrap_or_else(|| "Unknown simulation error".to_string()),
+                )
+            };
+            
+            // Save record asynchronously
+            if let Err(e) = self.storage.save_record(&trade_record).await {
+                warn!("Failed to save trade record: {}", e);
+            }
+            
             Ok(ArbitrageExecutionResult::Simulation(result))
         } else {
             warn!("⚠️  Execution mode: LIVE (real funds at risk)");
             warn!("⚠️  This will submit a real transaction to the Solana network");
             let result = self.execute_arbitrage_live(transaction, signer).await?;
+            
+            // Calculate latency
+            let latency_ms = start_time.elapsed().as_millis() as u64;
+            
+            // Create trade record for live execution
+            let trade_record = if result.confirmed && result.error.is_none() {
+                // Extract actual profit from profit validation if available
+                let actual_profit = result.profit_validation.as_ref()
+                    .and_then(|pv| {
+                        // Find profit for the specified token
+                        pv.profit_by_token.iter()
+                            .find(|tp| tp.mint == *profit_token_mint)
+                            .map(|tp| tp.amount_after.saturating_sub(tp.amount_before))
+                    })
+                    .unwrap_or(0);
+                
+                TradeRecord::success(
+                    timestamp,
+                    result.signature.clone(),
+                    profit_token_mint.to_string(),
+                    actual_profit,
+                    expected_profit_amount,
+                    latency_ms,
+                    execution_mode.to_string(),
+                )
+            } else {
+                // Live execution failed
+                TradeRecord::failure(
+                    timestamp,
+                    profit_token_mint.to_string(),
+                    expected_profit_amount,
+                    latency_ms,
+                    execution_mode.to_string(),
+                    result.error.clone().unwrap_or_else(|| "Transaction not confirmed".to_string()),
+                )
+            };
+            
+            // Save record asynchronously
+            if let Err(e) = self.storage.save_record(&trade_record).await {
+                warn!("Failed to save trade record: {}", e);
+            }
+            
             Ok(ArbitrageExecutionResult::Live(result))
         }
     }
