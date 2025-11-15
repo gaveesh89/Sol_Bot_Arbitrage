@@ -72,6 +72,18 @@ pub struct MintConfig {
 /// 1. LOCAL_FORK_URL (highest priority - for local testing)
 /// 2. RPC_URL (standard environment variable)
 /// 3. Mainnet-Beta (fallback default)
+/// 
+/// Feature: Dynamic Data Source Configuration
+/// 
+/// DECISION: Use optional URL (Chosen) vs boolean flag
+/// Chosen: A URL allows the bot to dynamically switch the data source without changing core logic.
+///         This enables "aggressive/dynamic" testing where the bot uses a local fork for
+///         transaction execution but fetches real-time pool data from an external API.
+/// 
+/// When `external_data_api_url` is set:
+/// - Pool data (reserves, prices) is fetched from the external API (e.g., Helius, Jupiter)
+/// - Transactions are still sent to the configured RPC URL (potentially a local fork)
+/// - This provides the best of both worlds: real-time data + safe testing environment
 #[derive(Debug, Clone, Deserialize)]
 pub struct RpcConfig {
     pub url: String,
@@ -79,6 +91,10 @@ pub struct RpcConfig {
     pub backup_urls: Vec<String>,
     pub commitment_level: String,
     pub timeout_seconds: u64,
+    /// Optional external API URL for fetching real-time pool data
+    /// Set via EXTERNAL_DATA_API_URL environment variable
+    /// Example: "https://mainnet.helius-rpc.com/?api-key=YOUR_KEY"
+    pub external_data_api_url: Option<String>,
 }
 
 /// Transaction spam configuration for higher inclusion probability
@@ -194,12 +210,14 @@ impl Config {
         // Alternative: Use a dedicated configuration file (config.toml) for complex
         //              environment switching with profiles (dev, test, prod)
         let rpc_url = get_env_or_default_rpc();
+        let external_data_api_url = std::env::var("EXTERNAL_DATA_API_URL").ok();
         let rpc = RpcConfig {
             url: rpc_url.clone(),
             ws_url: get_env_or_default_ws_url(&rpc_url),
             backup_urls: parse_string_list(&get_env_or_default("BACKUP_RPC_URLS", "")),
             commitment_level: get_env_or_default("COMMITMENT_LEVEL", "confirmed"),
             timeout_seconds: get_u64_env("RPC_TIMEOUT_SECONDS", 30)?,
+            external_data_api_url,
         };
 
         // Spam configuration

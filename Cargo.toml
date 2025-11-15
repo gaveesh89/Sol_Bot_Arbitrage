@@ -78,6 +78,7 @@ rand = "0.8"
 
 # Cryptography
 bs58 = "0.5"
+base64 = "0.21"
 
 # Numeric Operations
 rust_decimal = "1.33"
@@ -98,6 +99,9 @@ tokio-stream = "0.1.17"
 mockall = "0.12"
 proptest = "1.4"
 tempfile = "3.8"
+solana-program-test = "1.18"
+solana-test-validator = "1.18"
+serial_test = "3.0"  # For serializing integration tests
 
 [features]
 default = []
