@@ -102,6 +102,7 @@ tempfile = "3.8"
 solana-program-test = "1.18"
 solana-test-validator = "1.18"
 serial_test = "3.0"  # For serializing integration tests
+memory-stats = "1.0"  # For memory usage tracking
 
 [features]
 default = []

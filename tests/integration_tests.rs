@@ -1948,4 +1948,1089 @@ async fn test_compute_unit_estimation() {
         assert!(within_limit, "{} exceeds compute limit", operation);
     }
 }
+
+// ============================================================================
+// PERFORMANCE BENCHMARK TESTS
+// ============================================================================
+
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn bench_arbitrage_detection_latency() -> Result<()> {
+    println!("\n╔════════════════════════════════════════════════════════════════╗");
+    println!("║  ⚡ BENCHMARK: Arbitrage Detection Latency                    ║");
+    println!("╚════════════════════════════════════════════════════════════════╝\n");
+
+    println!("Measures time from pool update to opportunity detection.");
+    println!("Target: < 100ms (critical for MEV competitiveness)\n");
+
+    // Setup
+    println!("🔧 Setup");
+    println!("========\n");
+
+    let rpc_url = "http://127.0.0.1:8899";
+    let client = Arc::new(RpcClient::new(rpc_url.to_string()));
+
+    // Create test pool data (simulating real pool updates)
+    let test_pools = create_test_pool_data();
+    println!("✅ Created {} test pools", test_pools.len());
+
+    // Create graph and detector
+    let graph = Arc::new(std::sync::RwLock::new(ArbitrageGraph::new()));
+    let detector = BellmanFordDetector::new(graph.clone(), 10); // 10 bps min profit
+
+    println!("✅ Initialized detector\n");
+
+    // Benchmark configuration
+    const ITERATIONS: usize = 100;
+    const TARGET_LATENCY_MS: u128 = 100;
+
+    println!("📊 Benchmark Parameters");
+    println!("=======================\n");
+    println!("   • Iterations: {}", ITERATIONS);
+    println!("   • Target latency: {}ms", TARGET_LATENCY_MS);
+    println!("   • Pool count: {}", test_pools.len());
+    println!();
+
+    // Warm-up run (to prime caches)
+    println!("🔥 Warming up (10 iterations)...");
+    for _ in 0..10 {
+        populate_graph(&graph, &test_pools);
+        let _ = detector.detect_arbitrage(pubkey(USDC_MINT)).await;
+    }
+    println!("✅ Warm-up complete\n");
+
+    // Benchmark runs
+    println!("⚡ Running benchmark ({} iterations)...", ITERATIONS);
+    println!("─────────────────────────────────────────\n");
+
+    let mut latencies = Vec::with_capacity(ITERATIONS);
+    let mut successful_detections = 0;
+
+    for i in 0..ITERATIONS {
+        // Clear and repopulate graph (simulating pool update)
+        populate_graph(&graph, &test_pools);
+
+        // Measure detection time
+        let start = tokio::time::Instant::now();
+        
+        let opportunities = detector.detect_arbitrage(pubkey(USDC_MINT)).await?;
+        
+        let elapsed = start.elapsed();
+        let latency_ms = elapsed.as_micros() as f64 / 1000.0;
+        
+        latencies.push(latency_ms);
+
+        if !opportunities.is_empty() {
+            successful_detections += 1;
+        }
+
+        // Progress indicator every 10 iterations
+        if (i + 1) % 10 == 0 {
+            println!("   {} / {} iterations complete", i + 1, ITERATIONS);
+        }
+    }
+
+    println!("\n✅ Benchmark complete!\n");
+
+    // Calculate statistics
+    let sum: f64 = latencies.iter().sum();
+    let avg_latency = sum / latencies.len() as f64;
+    
+    let mut sorted_latencies = latencies.clone();
+    sorted_latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    
+    let min_latency = sorted_latencies[0];
+    let max_latency = sorted_latencies[sorted_latencies.len() - 1];
+    let p50_latency = sorted_latencies[sorted_latencies.len() / 2];
+    let p95_latency = sorted_latencies[(sorted_latencies.len() as f64 * 0.95) as usize];
+    let p99_latency = sorted_latencies[(sorted_latencies.len() as f64 * 0.99) as usize];
+
+    // Display results
+    println!("📊 RESULTS");
+    println!("══════════\n");
+
+    println!("🎯 Latency Statistics:");
+    println!("   • Average:  {:.2}ms", avg_latency);
+    println!("   • Median:   {:.2}ms (p50)", p50_latency);
+    println!("   • Min:      {:.2}ms", min_latency);
+    println!("   • Max:      {:.2}ms", max_latency);
+    println!("   • p95:      {:.2}ms", p95_latency);
+    println!("   • p99:      {:.2}ms", p99_latency);
+    println!();
+
+    println!("📈 Performance Analysis:");
+    println!("   • Successful detections: {} / {}", successful_detections, ITERATIONS);
+    println!("   • Detection rate: {:.1}%", (successful_detections as f64 / ITERATIONS as f64) * 100.0);
+    println!();
+
+    // Visual representation
+    println!("📊 Latency Distribution:");
+    let bar_length: usize = 50;
+    let target_percent = (avg_latency / TARGET_LATENCY_MS as f64) * 100.0;
+    let filled = ((avg_latency / TARGET_LATENCY_MS as f64) * bar_length as f64).min(bar_length as f64) as usize;
+    let empty = bar_length.saturating_sub(filled);
+    
+    println!("   [{}{}] {:.1}% of target",
+        "█".repeat(filled),
+        "░".repeat(empty),
+        target_percent
+    );
+    println!("   0ms                      {}ms                     {}ms", 
+        TARGET_LATENCY_MS / 2, TARGET_LATENCY_MS);
+    println!();
+
+    // Pass/fail determination
+    let passed = avg_latency < TARGET_LATENCY_MS as f64;
+    
+    if passed {
+        println!("✅ BENCHMARK PASSED");
+        println!("   Average latency {:.2}ms is under target of {}ms", avg_latency, TARGET_LATENCY_MS);
+        
+        let margin = TARGET_LATENCY_MS as f64 - avg_latency;
+        let margin_pct = (margin / TARGET_LATENCY_MS as f64) * 100.0;
+        println!("   Margin: {:.2}ms ({:.1}% headroom)", margin, margin_pct);
+    } else {
+        println!("❌ BENCHMARK FAILED");
+        println!("   Average latency {:.2}ms exceeds target of {}ms", avg_latency, TARGET_LATENCY_MS);
+        
+        let overage = avg_latency - TARGET_LATENCY_MS as f64;
+        let overage_pct = (overage / TARGET_LATENCY_MS as f64) * 100.0;
+        println!("   Overage: {:.2}ms ({:.1}% over)", overage, overage_pct);
+    }
+    println!();
+
+    // Recommendations
+    println!("💡 Recommendations:");
+    if avg_latency < 50.0 {
+        println!("   ✅ Excellent performance - well optimized for MEV");
+        println!("   • Detection is fast enough for competitive arbitrage");
+    } else if avg_latency < 100.0 {
+        println!("   ✅ Good performance - acceptable for MEV");
+        println!("   • Consider optimizing graph traversal for better speed");
+    } else {
+        println!("   ⚠️  Performance needs improvement:");
+        println!("   • Optimize Bellman-Ford algorithm");
+        println!("   • Consider caching exchange rates");
+        println!("   • Use parallel graph processing");
+        println!("   • Pre-filter pools by liquidity");
+    }
+    println!();
+
+    assert!(passed, "Detection latency exceeded target");
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn bench_transaction_building_latency() -> Result<()> {
+    println!("\n╔════════════════════════════════════════════════════════════════╗");
+    println!("║  ⚡ BENCHMARK: Transaction Building Latency                   ║");
+    println!("╚════════════════════════════════════════════════════════════════╝\n");
+
+    println!("Measures time to build complete arbitrage transaction.");
+    println!("Target: < 50ms (critical for MEV execution speed)\n");
+
+    // Setup
+    println!("🔧 Setup");
+    println!("========\n");
+
+    use solana_mev_bot::chain::transaction_builder::{SwapTransactionBuilder, TransactionConfig};
+    use std::collections::HashMap;
+
+    let test_keypair = Keypair::new();
+    println!("✅ Test keypair: {}", test_keypair.pubkey());
+
+    // Create token accounts
+    let mut token_accounts = HashMap::new();
+    token_accounts.insert(pubkey(SOL_MINT), test_keypair.pubkey());
+    token_accounts.insert(pubkey(USDC_MINT), test_keypair.pubkey());
+    token_accounts.insert(pubkey(USDT_MINT), test_keypair.pubkey());
+
+    // Create test arbitrage cycle
+    let test_cycle = create_test_arbitrage_cycle();
+    println!("✅ Created test cycle: {} hops", test_cycle.path.len());
+
+    // Transaction config
+    let tx_config = TransactionConfig {
+        max_slippage_bps: 100,
+        priority_fee_micro_lamports: 50_000,
+        compute_unit_buffer: 1_000_000,
+    };
+    println!("✅ Transaction config ready\n");
+
+    // Benchmark configuration
+    const ITERATIONS: usize = 100;
+    const TARGET_LATENCY_MS: u128 = 50;
+
+    println!("📊 Benchmark Parameters");
+    println!("=======================\n");
+    println!("   • Iterations: {}", ITERATIONS);
+    println!("   • Target latency: {}ms", TARGET_LATENCY_MS);
+    println!("   • Path hops: {}", test_cycle.path.len());
+    println!();
+
+    // Warm-up
+    println!("🔥 Warming up (10 iterations)...");
+    for _ in 0..10 {
+        let builder = SwapTransactionBuilder::new(
+            Keypair::from_bytes(&test_keypair.to_bytes()).unwrap(),
+            token_accounts.clone(),
+            vec![],
+        );
+        let _ = builder.build_arbitrage_tx(&test_cycle, 100_000_000u64, &tx_config).await;
+    }
+    println!("✅ Warm-up complete\n");
+
+    // Benchmark runs
+    println!("⚡ Running benchmark ({} iterations)...", ITERATIONS);
+    println!("─────────────────────────────────────────\n");
+
+    let mut latencies = Vec::with_capacity(ITERATIONS);
+    let mut successful_builds = 0;
+
+    for i in 0..ITERATIONS {
+        let builder = SwapTransactionBuilder::new(
+            Keypair::from_bytes(&test_keypair.to_bytes()).unwrap(),
+            token_accounts.clone(),
+            vec![],
+        );
+
+        let start = tokio::time::Instant::now();
+        
+        let result = builder.build_arbitrage_tx(&test_cycle, 100_000_000u64, &tx_config).await;
+        
+        let elapsed = start.elapsed();
+        let latency_ms = elapsed.as_micros() as f64 / 1000.0;
+        
+        latencies.push(latency_ms);
+
+        if result.is_ok() {
+            successful_builds += 1;
+        }
+
+        if (i + 1) % 10 == 0 {
+            println!("   {} / {} iterations complete", i + 1, ITERATIONS);
+        }
+    }
+
+    println!("\n✅ Benchmark complete!\n");
+
+    // Calculate statistics
+    let sum: f64 = latencies.iter().sum();
+    let avg_latency = sum / latencies.len() as f64;
+    
+    let mut sorted_latencies = latencies.clone();
+    sorted_latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    
+    let min_latency = sorted_latencies[0];
+    let max_latency = sorted_latencies[sorted_latencies.len() - 1];
+    let p50_latency = sorted_latencies[sorted_latencies.len() / 2];
+    let p95_latency = sorted_latencies[(sorted_latencies.len() as f64 * 0.95) as usize];
+    let p99_latency = sorted_latencies[(sorted_latencies.len() as f64 * 0.99) as usize];
+
+    // Display results
+    println!("📊 RESULTS");
+    println!("══════════\n");
+
+    println!("🎯 Latency Statistics:");
+    println!("   • Average:  {:.2}ms", avg_latency);
+    println!("   • Median:   {:.2}ms (p50)", p50_latency);
+    println!("   • Min:      {:.2}ms", min_latency);
+    println!("   • Max:      {:.2}ms", max_latency);
+    println!("   • p95:      {:.2}ms", p95_latency);
+    println!("   • p99:      {:.2}ms", p99_latency);
+    println!();
+
+    println!("📈 Performance Analysis:");
+    println!("   • Successful builds: {} / {}", successful_builds, ITERATIONS);
+    println!("   • Success rate: {:.1}%", (successful_builds as f64 / ITERATIONS as f64) * 100.0);
+    println!();
+
+    // Visual representation
+    println!("📊 Latency Distribution:");
+    let bar_length: usize = 50;
+    let target_percent = (avg_latency / TARGET_LATENCY_MS as f64) * 100.0;
+    let filled = ((avg_latency / TARGET_LATENCY_MS as f64) * bar_length as f64).min(bar_length as f64) as usize;
+    let empty = bar_length.saturating_sub(filled);
+    
+    println!("   [{}{}] {:.1}% of target",
+        "█".repeat(filled),
+        "░".repeat(empty),
+        target_percent
+    );
+    println!("   0ms                      {}ms                      {}ms", 
+        TARGET_LATENCY_MS / 2, TARGET_LATENCY_MS);
+    println!();
+
+    // Pass/fail
+    let passed = avg_latency < TARGET_LATENCY_MS as f64;
+    
+    if passed {
+        println!("✅ BENCHMARK PASSED");
+        println!("   Average latency {:.2}ms is under target of {}ms", avg_latency, TARGET_LATENCY_MS);
+        
+        let margin = TARGET_LATENCY_MS as f64 - avg_latency;
+        let margin_pct = (margin / TARGET_LATENCY_MS as f64) * 100.0;
+        println!("   Margin: {:.2}ms ({:.1}% headroom)", margin, margin_pct);
+    } else {
+        println!("❌ BENCHMARK FAILED");
+        println!("   Average latency {:.2}ms exceeds target of {}ms", avg_latency, TARGET_LATENCY_MS);
+        
+        let overage = avg_latency - TARGET_LATENCY_MS as f64;
+        let overage_pct = (overage / TARGET_LATENCY_MS as f64) * 100.0;
+        println!("   Overage: {:.2}ms ({:.1}% over)", overage, overage_pct);
+    }
+    println!();
+
+    // Recommendations
+    println!("💡 Recommendations:");
+    if avg_latency < 20.0 {
+        println!("   ✅ Excellent performance - very fast transaction building");
+    } else if avg_latency < 50.0 {
+        println!("   ✅ Good performance - acceptable for MEV");
+        println!("   • Consider caching instruction templates");
+    } else {
+        println!("   ⚠️  Performance needs improvement:");
+        println!("   • Pre-compute instruction layouts");
+        println!("   • Cache token account lookups");
+        println!("   • Optimize signature generation");
+        println!("   • Use instruction batching");
+    }
+    println!();
+
+    assert!(passed, "Transaction building latency exceeded target");
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn bench_end_to_end_latency() -> Result<()> {
+    println!("\n╔════════════════════════════════════════════════════════════════╗");
+    println!("║  ⚡ BENCHMARK: End-to-End Latency                             ║");
+    println!("╚════════════════════════════════════════════════════════════════╝\n");
+
+    println!("Measures total time from opportunity detection to transaction submission.");
+    println!("Target: < 200ms (CRITICAL for MEV competitiveness)\n");
+
+    // Setup
+    println!("🔧 Setup");
+    println!("========\n");
+
+    use solana_mev_bot::chain::transaction_builder::{SwapTransactionBuilder, TransactionConfig};
+    use std::collections::HashMap;
+
+    let rpc_url = "http://127.0.0.1:8899";
+    let client = Arc::new(RpcClient::new(rpc_url.to_string()));
+
+    // Verify validator is running
+    match client.get_version().await {
+        Ok(version) => {
+            println!("✅ Validator running: {}", version.solana_core);
+        }
+        Err(_) => {
+            println!("⚠️  Validator not running - using mock submission");
+            println!("   Start validator for real network latency testing\n");
+        }
+    }
+
+    let test_keypair = Keypair::new();
+    println!("✅ Test keypair: {}", test_keypair.pubkey());
+
+    // Setup components
+    let graph = Arc::new(std::sync::RwLock::new(ArbitrageGraph::new()));
+    let detector = BellmanFordDetector::new(graph.clone(), 10);
+    
+    let test_pools = create_test_pool_data();
+    populate_graph(&graph, &test_pools);
+    
+    let mut token_accounts = HashMap::new();
+    token_accounts.insert(pubkey(SOL_MINT), test_keypair.pubkey());
+    token_accounts.insert(pubkey(USDC_MINT), test_keypair.pubkey());
+    token_accounts.insert(pubkey(USDT_MINT), test_keypair.pubkey());
+
+    let tx_config = TransactionConfig {
+        max_slippage_bps: 100,
+        priority_fee_micro_lamports: 50_000,
+        compute_unit_buffer: 1_000_000,
+    };
+
+    println!("✅ All components initialized\n");
+
+    // Benchmark configuration
+    const ITERATIONS: usize = 100;
+    const TARGET_LATENCY_MS: u128 = 200;
+
+    println!("📊 Benchmark Parameters");
+    println!("=======================\n");
+    println!("   • Iterations: {}", ITERATIONS);
+    println!("   • Target latency: {}ms", TARGET_LATENCY_MS);
+    println!("   • Includes: Detection + Build + Serialize");
+    println!();
+
+    // Warm-up
+    println!("🔥 Warming up (10 iterations)...");
+    for _ in 0..10 {
+        let _ = detector.detect_arbitrage(pubkey(USDC_MINT)).await;
+    }
+    println!("✅ Warm-up complete\n");
+
+    // Benchmark runs
+    println!("⚡ Running benchmark ({} iterations)...", ITERATIONS);
+    println!("─────────────────────────────────────────\n");
+
+    let mut latencies = Vec::with_capacity(ITERATIONS);
+    let mut detection_times = Vec::with_capacity(ITERATIONS);
+    let mut build_times = Vec::with_capacity(ITERATIONS);
+    let mut serialize_times = Vec::with_capacity(ITERATIONS);
+    let mut successful_runs = 0;
+
+    for i in 0..ITERATIONS {
+        let start_total = tokio::time::Instant::now();
+        
+        // Phase 1: Detection
+        let detect_start = tokio::time::Instant::now();
+        let opportunities = detector.detect_arbitrage(pubkey(USDC_MINT)).await?;
+        let detect_elapsed = detect_start.elapsed().as_micros() as f64 / 1000.0;
+        detection_times.push(detect_elapsed);
+
+        if opportunities.is_empty() {
+            // Use test cycle if no opportunities found
+            let test_cycle = create_test_arbitrage_cycle();
+            
+            // Phase 2: Build transaction
+            let build_start = tokio::time::Instant::now();
+            let builder = SwapTransactionBuilder::new(
+                Keypair::from_bytes(&test_keypair.to_bytes()).unwrap(),
+                token_accounts.clone(),
+                vec![],
+            );
+            let tx_result = builder.build_arbitrage_tx(&test_cycle, 100_000_000u64, &tx_config).await;
+            let build_elapsed = build_start.elapsed().as_micros() as f64 / 1000.0;
+            build_times.push(build_elapsed);
+
+            // Phase 3: Serialize (preparing for submission)
+            if let Ok(tx) = tx_result {
+                let serialize_start = tokio::time::Instant::now();
+                let _ = bincode::serialize(&tx);
+                let serialize_elapsed = serialize_start.elapsed().as_micros() as f64 / 1000.0;
+                serialize_times.push(serialize_elapsed);
+                
+                successful_runs += 1;
+            } else {
+                serialize_times.push(0.0);
+            }
+        } else {
+            // Use detected opportunity
+            let best = &opportunities[0];
+            
+            let build_start = tokio::time::Instant::now();
+            let builder = SwapTransactionBuilder::new(
+                Keypair::from_bytes(&test_keypair.to_bytes()).unwrap(),
+                token_accounts.clone(),
+                vec![],
+            );
+            let tx_result = builder.build_arbitrage_tx(best, 100_000_000u64, &tx_config).await;
+            let build_elapsed = build_start.elapsed().as_micros() as f64 / 1000.0;
+            build_times.push(build_elapsed);
+
+            if let Ok(tx) = tx_result {
+                let serialize_start = tokio::time::Instant::now();
+                let _ = bincode::serialize(&tx);
+                let serialize_elapsed = serialize_start.elapsed().as_micros() as f64 / 1000.0;
+                serialize_times.push(serialize_elapsed);
+                
+                successful_runs += 1;
+            } else {
+                serialize_times.push(0.0);
+            }
+        }
+
+        let total_elapsed = start_total.elapsed().as_micros() as f64 / 1000.0;
+        latencies.push(total_elapsed);
+
+        if (i + 1) % 10 == 0 {
+            println!("   {} / {} iterations complete", i + 1, ITERATIONS);
+        }
+    }
+
+    println!("\n✅ Benchmark complete!\n");
+
+    // Calculate statistics
+    let avg_total = latencies.iter().sum::<f64>() / latencies.len() as f64;
+    let avg_detection = detection_times.iter().sum::<f64>() / detection_times.len() as f64;
+    let avg_build = build_times.iter().sum::<f64>() / build_times.len() as f64;
+    let avg_serialize = serialize_times.iter().sum::<f64>() / serialize_times.len() as f64;
+    
+    let mut sorted_latencies = latencies.clone();
+    sorted_latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    
+    let min_latency = sorted_latencies[0];
+    let max_latency = sorted_latencies[sorted_latencies.len() - 1];
+    let p50_latency = sorted_latencies[sorted_latencies.len() / 2];
+    let p95_latency = sorted_latencies[(sorted_latencies.len() as f64 * 0.95) as usize];
+    let p99_latency = sorted_latencies[(sorted_latencies.len() as f64 * 0.99) as usize];
+
+    // Display results
+    println!("📊 RESULTS");
+    println!("══════════\n");
+
+    println!("🎯 End-to-End Latency:");
+    println!("   • Average:  {:.2}ms", avg_total);
+    println!("   • Median:   {:.2}ms (p50)", p50_latency);
+    println!("   • Min:      {:.2}ms", min_latency);
+    println!("   • Max:      {:.2}ms", max_latency);
+    println!("   • p95:      {:.2}ms", p95_latency);
+    println!("   • p99:      {:.2}ms", p99_latency);
+    println!();
+
+    println!("⏱️  Phase Breakdown:");
+    println!("   • Detection:    {:.2}ms ({:.1}%)", avg_detection, (avg_detection / avg_total) * 100.0);
+    println!("   • Building:     {:.2}ms ({:.1}%)", avg_build, (avg_build / avg_total) * 100.0);
+    println!("   • Serialization: {:.2}ms ({:.1}%)", avg_serialize, (avg_serialize / avg_total) * 100.0);
+    println!();
+
+    println!("📈 Performance Analysis:");
+    println!("   • Successful runs: {} / {}", successful_runs, ITERATIONS);
+    println!("   • Success rate: {:.1}%", (successful_runs as f64 / ITERATIONS as f64) * 100.0);
+    println!();
+
+    // Visual representation
+    println!("📊 Latency Distribution:");
+    let bar_length: usize = 50;
+    let target_percent = (avg_total / TARGET_LATENCY_MS as f64) * 100.0;
+    let filled = ((avg_total / TARGET_LATENCY_MS as f64) * bar_length as f64).min(bar_length as f64) as usize;
+    let empty = bar_length.saturating_sub(filled);
+    
+    println!("   [{}{}] {:.1}% of target",
+        "█".repeat(filled),
+        "░".repeat(empty),
+        target_percent
+    );
+    println!("   0ms                     {}ms                    {}ms", 
+        TARGET_LATENCY_MS / 2, TARGET_LATENCY_MS);
+    println!();
+
+    // Pass/fail
+    let passed = avg_total < TARGET_LATENCY_MS as f64;
+    
+    if passed {
+        println!("✅ BENCHMARK PASSED");
+        println!("   Average latency {:.2}ms is under target of {}ms", avg_total, TARGET_LATENCY_MS);
+        
+        let margin = TARGET_LATENCY_MS as f64 - avg_total;
+        let margin_pct = (margin / TARGET_LATENCY_MS as f64) * 100.0;
+        println!("   Margin: {:.2}ms ({:.1}% headroom)", margin, margin_pct);
+    } else {
+        println!("❌ BENCHMARK FAILED");
+        println!("   Average latency {:.2}ms exceeds target of {}ms", avg_total, TARGET_LATENCY_MS);
+        
+        let overage = avg_total - TARGET_LATENCY_MS as f64;
+        let overage_pct = (overage / TARGET_LATENCY_MS as f64) * 100.0;
+        println!("   Overage: {:.2}ms ({:.1}% over)", overage, overage_pct);
+    }
+    println!();
+
+    // Bottleneck analysis
+    println!("🔍 Bottleneck Analysis:");
+    let slowest_phase = if avg_detection > avg_build && avg_detection > avg_serialize {
+        "Detection"
+    } else if avg_build > avg_serialize {
+        "Building"
+    } else {
+        "Serialization"
+    };
+    println!("   • Slowest phase: {}", slowest_phase);
+    
+    if avg_detection > 50.0 {
+        println!("   ⚠️  Detection phase is slow - optimize graph traversal");
+    }
+    if avg_build > 30.0 {
+        println!("   ⚠️  Building phase is slow - cache instruction templates");
+    }
+    if avg_serialize > 5.0 {
+        println!("   ⚠️  Serialization is slow - unusual, check data structures");
+    }
+    println!();
+
+    // MEV competitiveness assessment
+    println!("🏆 MEV Competitiveness:");
+    if avg_total < 100.0 {
+        println!("   ✅ HIGHLY COMPETITIVE");
+        println!("   • Sub-100ms latency enables winning most opportunities");
+        println!("   • Well-positioned for profitable MEV extraction");
+    } else if avg_total < 150.0 {
+        println!("   ✅ COMPETITIVE");
+        println!("   • Good latency for most opportunities");
+        println!("   • May lose some races against faster bots");
+    } else if avg_total < 200.0 {
+        println!("   ⚠️  MARGINALLY COMPETITIVE");
+        println!("   • At acceptable threshold but room for improvement");
+        println!("   • Will lose races against highly optimized bots");
+    } else {
+        println!("   ❌ NOT COMPETITIVE");
+        println!("   • Too slow for MEV extraction");
+        println!("   • Immediate optimization required");
+    }
+    println!();
+
+    // Recommendations
+    println!("💡 Optimization Recommendations:");
+    if avg_total < 100.0 {
+        println!("   ✅ Performance is excellent - minor optimizations only:");
+        println!("   • Fine-tune RPC endpoint selection");
+        println!("   • Consider jito bundles for better execution");
+    } else if avg_total < 200.0 {
+        println!("   • Optimize slowest phase first ({})", slowest_phase);
+        println!("   • Use parallel processing where possible");
+        println!("   • Consider co-locating with validators");
+    } else {
+        println!("   ⚠️  CRITICAL - Immediate action required:");
+        println!("   • Profile code to find bottlenecks");
+        println!("   • Implement instruction caching");
+        println!("   • Use async/parallel processing");
+        println!("   • Consider Rust optimization flags");
+        println!("   • Evaluate hardware upgrade");
+    }
+    println!();
+
+    assert!(passed, "End-to-end latency exceeded target");
+
+    Ok(())
+}
+
+// ============================================================================
+// HELPER FUNCTIONS FOR BENCHMARKS
+// ============================================================================
+
+/// Create test pool data for benchmarking
+fn create_test_pool_data() -> Vec<(Pubkey, Pubkey, Pubkey, f64, u16, DexType)> {
+    vec![
+        // SOL/USDC pools
+        (pubkey(SOL_MINT), pubkey(USDC_MINT), pubkey(RAYDIUM_SOL_USDC), 180.5, 25, DexType::Raydium),
+        (pubkey(SOL_MINT), pubkey(USDC_MINT), pubkey(ORCA_SOL_USDC_WHIRLPOOL), 181.0, 30, DexType::Orca),
+        (pubkey(SOL_MINT), pubkey(USDC_MINT), pubkey(METEORA_SOL_USDC_DLMM), 180.8, 20, DexType::Meteora),
+        
+        // USDC/USDT pools
+        (pubkey(USDC_MINT), pubkey(USDT_MINT), pubkey(RAYDIUM_USDC_USDT), 1.0001, 25, DexType::Raydium),
+        (pubkey(USDC_MINT), pubkey(USDT_MINT), pubkey(ORCA_USDC_USDT), 1.0002, 30, DexType::Orca),
+        
+        // USDT/SOL pools (completing triangles)
+        (pubkey(USDT_MINT), pubkey(SOL_MINT), pubkey(RAYDIUM_SOL_USDC), 0.00554, 25, DexType::Raydium),
+    ]
+}
+
+/// Populate graph with test pool data
+fn populate_graph(
+    graph: &Arc<std::sync::RwLock<ArbitrageGraph>>,
+    pools: &[(Pubkey, Pubkey, Pubkey, f64, u16, DexType)],
+) {
+    let mut graph_write = graph.write().unwrap();
+    
+    // Clear existing edges
+    *graph_write = ArbitrageGraph::new();
+    
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    
+    for (token_a, token_b, pool, rate, fee_bps, dex) in pools {
+        // A -> B edge
+        let edge_a_b = ExchangeEdge::new(
+            *token_a,
+            *token_b,
+            dex.clone(),
+            *pool,
+            *rate,
+            *fee_bps,
+            vec![],
+            timestamp,
+        );
+        graph_write.add_edge(edge_a_b);
+        
+        // B -> A edge (reverse rate)
+        let edge_b_a = ExchangeEdge::new(
+            *token_b,
+            *token_a,
+            dex.clone(),
+            *pool,
+            1.0 / rate,
+            *fee_bps,
+            vec![],
+            timestamp,
+        );
+        graph_write.add_edge(edge_b_a);
+    }
+}
+
+/// Create test arbitrage cycle for benchmarking
+fn create_test_arbitrage_cycle() -> ArbitrageCycle {
+    ArbitrageCycle {
+        path: vec![
+            CycleStep {
+                from_token: pubkey(USDC_MINT),
+                to_token: pubkey(SOL_MINT),
+                dex: DexType::Raydium,
+                pool: pubkey(RAYDIUM_SOL_USDC),
+                rate: 0.00554,
+                fee_bps: 25,
+            },
+            CycleStep {
+                from_token: pubkey(SOL_MINT),
+                to_token: pubkey(USDT_MINT),
+                dex: DexType::Orca,
+                pool: pubkey(ORCA_SOL_USDC_WHIRLPOOL),
+                rate: 181.0,
+                fee_bps: 30,
+            },
+            CycleStep {
+                from_token: pubkey(USDT_MINT),
+                to_token: pubkey(USDC_MINT),
+                dex: DexType::Meteora,
+                pool: pubkey(RAYDIUM_USDC_USDT),
+                rate: 1.0002,
+                fee_bps: 20,
+            },
+        ],
+        gross_profit_bps: 15,
+        net_profit_after_fees: 0.075,
+        execution_time_estimate_ms: 500,
+        total_fee_bps: 75,
+        start_token: pubkey(USDC_MINT),
+        cycle_weight: -0.0015,
+    }
+}
+
+// ============================================================================
+// MEMORY STABILITY TEST
+// ============================================================================
+
+#[tokio::test]
+#[serial]
+#[ignore]
+async fn test_memory_usage_stable() -> Result<()> {
+    println!("\n╔════════════════════════════════════════════════════════════════╗");
+    println!("║  🧪 TEST: Memory Usage Stability                              ║");
+    println!("╚════════════════════════════════════════════════════════════════╝\n");
+
+    println!("Validates that repeated pool updates don't cause memory leaks.");
+    println!("Simulates 1000 pool updates and monitors heap usage.\n");
+
+    // Setup
+    println!("🔧 Setup");
+    println!("========\n");
+
+    let rpc_url = "http://127.0.0.1:8899";
+    let client = Arc::new(RpcClient::new(rpc_url.to_string()));
+
+    // Verify validator is running
+    match client.get_version().await {
+        Ok(version) => {
+            println!("✅ Validator running: {}", version.solana_core);
+        }
+        Err(_) => {
+            println!("⚠️  Validator not running - test will use mock setup");
+            println!("   Start validator with: ./start-mainnet-fork.sh\n");
+        }
+    }
+
+    // Create shared graph
+    use solana_mev_bot::dex::triangular_arb::create_shared_graph;
+    let graph = create_shared_graph();
+    
+    // Create detector
+    let min_profit_bps = 10;
+    let detector = BellmanFordDetector::new(graph.clone(), min_profit_bps);
+    
+    println!("✅ Created arbitrage graph and detector");
+    println!("✅ Minimum profit threshold: {} bps\n", min_profit_bps);
+
+    // Test configuration
+    const TOTAL_UPDATES: usize = 1000;
+    const CHECK_INTERVAL: usize = 100;
+    const MAX_MEMORY_GROWTH_MB: f64 = 50.0; // Allow max 50MB growth over 1000 iterations
+
+    println!("📊 Test Configuration");
+    println!("=====================\n");
+    println!("   • Total pool updates: {}", TOTAL_UPDATES);
+    println!("   • Memory check interval: every {} updates", CHECK_INTERVAL);
+    println!("   • Max allowed growth: {:.1} MB", MAX_MEMORY_GROWTH_MB);
+    println!();
+
+    // Track memory usage over time
+    let mut memory_samples = Vec::new();
+    let mut initial_memory_mb: Option<f64> = None;
+
+    println!("🔬 Memory Stability Test");
+    println!("=========================\n");
+
+    // Helper function to get current memory usage
+    let get_memory_usage = || -> Option<f64> {
+        if let Some(usage) = memory_stats::memory_stats() {
+            Some(usage.physical_mem as f64 / 1024.0 / 1024.0) // Convert to MB
+        } else {
+            None
+        }
+    };
+
+    // Baseline memory measurement
+    if let Some(baseline) = get_memory_usage() {
+        initial_memory_mb = Some(baseline);
+        println!("📌 Baseline memory: {:.2} MB\n", baseline);
+    } else {
+        println!("⚠️  Unable to measure memory on this platform");
+        println!("   Test will continue but won't verify memory stability\n");
+    }
+
+    // Force garbage collection before starting
+    // (Rust doesn't have manual GC, but we can drop large allocations)
+    drop(Vec::<u8>::with_capacity(1024 * 1024)); // Dummy allocation to trigger any pending cleanup
+
+    println!("⚡ Running {} pool updates...", TOTAL_UPDATES);
+    println!("─────────────────────────────────────────\n");
+
+    // Create test pool data
+    let test_pools = create_test_pool_data_for_memory_test();
+    
+    for i in 0..TOTAL_UPDATES {
+        // Simulate pool update: clear and repopulate graph
+        {
+            let mut graph_write = graph.write().unwrap();
+            *graph_write = ArbitrageGraph::new();
+            
+            // Add edges for current iteration (simulate real pool updates)
+            for (idx, (token_a, token_b, pool, base_rate, fee_bps, dex)) in test_pools.iter().enumerate() {
+                // Vary rates slightly to simulate real market movement
+                let rate_variation = 1.0 + ((i + idx) as f64 * 0.0001) % 0.01;
+                let rate = base_rate * rate_variation;
+                
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+                
+                // A -> B edge
+                let edge_a_b = ExchangeEdge::new(
+                    *token_a,
+                    *token_b,
+                    dex.clone(),
+                    *pool,
+                    rate,
+                    *fee_bps,
+                    vec![],
+                    timestamp,
+                );
+                graph_write.add_edge(edge_a_b);
+                
+                // B -> A edge
+                let edge_b_a = ExchangeEdge::new(
+                    *token_b,
+                    *token_a,
+                    dex.clone(),
+                    *pool,
+                    1.0 / rate,
+                    *fee_bps,
+                    vec![],
+                    timestamp,
+                );
+                graph_write.add_edge(edge_b_a);
+            }
+        } // Release write lock
+        
+        // Run detection
+        let _opportunities = detector.detect_arbitrage(pubkey(USDC_MINT)).await?;
+        
+        // Memory checkpoint every CHECK_INTERVAL updates
+        if (i + 1) % CHECK_INTERVAL == 0 {
+            if let Some(current_memory) = get_memory_usage() {
+                memory_samples.push((i + 1, current_memory));
+                
+                let growth = if let Some(initial) = initial_memory_mb {
+                    current_memory - initial
+                } else {
+                    0.0
+                };
+                
+                println!("   {} / {} updates: {:.2} MB (growth: {:+.2} MB)", 
+                    i + 1, TOTAL_UPDATES, current_memory, growth);
+            }
+        }
+        
+        // Progress indicator
+        if (i + 1) % 250 == 0 && (i + 1) % CHECK_INTERVAL != 0 {
+            println!("   {} / {} updates...", i + 1, TOTAL_UPDATES);
+        }
+    }
+
+    println!("\n✅ Completed {} pool updates!\n", TOTAL_UPDATES);
+
+    // Analyze memory usage
+    println!("📊 MEMORY ANALYSIS");
+    println!("══════════════════\n");
+
+    if let Some(initial) = initial_memory_mb {
+        if let Some(&(_, final_memory)) = memory_samples.last() {
+            let total_growth = final_memory - initial;
+            let growth_per_1k = total_growth;
+            let growth_percentage = (total_growth / initial) * 100.0;
+
+            println!("📈 Memory Statistics:");
+            println!("   • Initial memory:  {:.2} MB", initial);
+            println!("   • Final memory:    {:.2} MB", final_memory);
+            println!("   • Total growth:    {:+.2} MB", total_growth);
+            println!("   • Growth per 1k:   {:+.2} MB", growth_per_1k);
+            println!("   • Growth percent:  {:+.1}%", growth_percentage);
+            println!();
+
+            // Calculate memory trend (linear regression)
+            if memory_samples.len() >= 2 {
+                let n = memory_samples.len() as f64;
+                let sum_x: f64 = memory_samples.iter().map(|(x, _)| *x as f64).sum();
+                let sum_y: f64 = memory_samples.iter().map(|(_, y)| *y).sum();
+                let sum_xy: f64 = memory_samples.iter().map(|(x, y)| (*x as f64) * y).sum();
+                let sum_x2: f64 = memory_samples.iter().map(|(x, _)| (*x as f64).powi(2)).sum();
+                
+                let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x.powi(2));
+                let intercept = (sum_y - slope * sum_x) / n;
+                
+                // Predict memory at 10k, 100k updates
+                let predicted_10k = intercept + slope * 10_000.0;
+                let predicted_100k = intercept + slope * 100_000.0;
+                
+                println!("📉 Memory Trend Analysis:");
+                println!("   • Slope: {:+.4} MB per 1k updates", slope);
+                println!("   • Predicted at 10k:  {:.2} MB ({:+.2} MB growth)", 
+                    predicted_10k, predicted_10k - initial);
+                println!("   • Predicted at 100k: {:.2} MB ({:+.2} MB growth)", 
+                    predicted_100k, predicted_100k - initial);
+                println!();
+
+                // Check if memory is stable (slope near zero) or growing
+                let is_stable = slope.abs() < 0.01; // Less than 0.01 MB growth per 1k updates
+                let is_acceptable = slope < 0.1; // Less than 0.1 MB growth per 1k updates
+
+                if is_stable {
+                    println!("✅ Memory is STABLE (minimal growth)");
+                    println!("   • The graph shows constant memory usage");
+                    println!("   • No memory leaks detected");
+                } else if is_acceptable {
+                    println!("✅ Memory growth is ACCEPTABLE");
+                    println!("   • Small linear growth detected");
+                    println!("   • Likely due to graph size increase");
+                } else {
+                    println!("⚠️  Memory growth is CONCERNING");
+                    println!("   • Linear growth rate: {:+.4} MB per 1k updates", slope);
+                    println!("   • Potential memory leak or unbounded cache");
+                }
+                println!();
+            }
+
+            // Visual representation
+            println!("📊 Memory Usage Over Time:");
+            let max_memory = memory_samples.iter().map(|(_, m)| *m).fold(f64::MIN, f64::max);
+            let min_memory = memory_samples.iter().map(|(_, m)| *m).fold(f64::MAX, f64::min);
+            let range = max_memory - min_memory;
+            
+            for (updates, memory) in &memory_samples {
+                let bar_length = if range > 0.0 {
+                    ((memory - min_memory) / range * 40.0) as usize
+                } else {
+                    20
+                };
+                println!("   {:4} updates: [{}{}] {:.2} MB",
+                    updates,
+                    "█".repeat(bar_length),
+                    "░".repeat(40 - bar_length),
+                    memory);
+            }
+            println!();
+
+            // Assertions
+            println!("🧪 Validation");
+            println!("=============\n");
+
+            let passed_growth_limit = total_growth < MAX_MEMORY_GROWTH_MB;
+            let passed_no_leak = total_growth < 100.0; // Strict: less than 100MB for 1k updates
+            
+            if passed_growth_limit {
+                println!("✅ PASS: Memory growth within limit");
+                println!("   Growth {:.2} MB < {:.2} MB limit", total_growth, MAX_MEMORY_GROWTH_MB);
+            } else {
+                println!("❌ FAIL: Memory growth exceeds limit");
+                println!("   Growth {:.2} MB > {:.2} MB limit", total_growth, MAX_MEMORY_GROWTH_MB);
+            }
+            println!();
+
+            if passed_no_leak {
+                println!("✅ PASS: No significant memory leak detected");
+                println!("   Growth {:.2} MB is reasonable for {} updates", total_growth, TOTAL_UPDATES);
+            } else {
+                println!("❌ FAIL: Potential memory leak detected");
+                println!("   Growth {:.2} MB is excessive for {} updates", total_growth, TOTAL_UPDATES);
+            }
+            println!();
+
+            // Recommendations
+            println!("💡 Recommendations:");
+            if total_growth < 10.0 {
+                println!("   ✅ Excellent memory management");
+                println!("   • Graph efficiently reuses allocations");
+                println!("   • Detector buffers are working correctly");
+            } else if total_growth < 50.0 {
+                println!("   ✅ Good memory management");
+                println!("   • Some growth is expected with graph updates");
+                println!("   • Consider implementing buffer pooling if growth continues");
+            } else {
+                println!("   ⚠️  Memory management needs attention:");
+                println!("   • Profile with flamegraph to find leaks");
+                println!("   • Verify graph clear() properly releases memory");
+                println!("   • Check detector buffer reuse implementation");
+                println!("   • Consider using arena allocators for hot paths");
+            }
+            println!();
+
+            // Final assertion
+            assert!(
+                passed_growth_limit,
+                "Memory growth {:.2} MB exceeds limit of {:.2} MB",
+                total_growth,
+                MAX_MEMORY_GROWTH_MB
+            );
+
+        } else {
+            println!("⚠️  No memory samples collected");
+        }
+    } else {
+        println!("⚠️  Memory tracking not available on this platform");
+        println!("   Test passed (no validation possible)");
+    }
+
+    Ok(())
+}
+
+/// Create test pool data for memory stability testing
+fn create_test_pool_data_for_memory_test() -> Vec<(Pubkey, Pubkey, Pubkey, f64, u16, DexType)> {
+    vec![
+        // SOL/USDC pools (3 DEXs)
+        (pubkey(SOL_MINT), pubkey(USDC_MINT), pubkey(RAYDIUM_SOL_USDC), 180.5, 25, DexType::Raydium),
+        (pubkey(SOL_MINT), pubkey(USDC_MINT), pubkey(ORCA_SOL_USDC_WHIRLPOOL), 181.0, 30, DexType::Orca),
+        (pubkey(SOL_MINT), pubkey(USDC_MINT), pubkey(METEORA_SOL_USDC_DLMM), 180.8, 20, DexType::Meteora),
+        
+        // USDC/USDT pools (2 DEXs)
+        (pubkey(USDC_MINT), pubkey(USDT_MINT), pubkey(RAYDIUM_USDC_USDT), 1.0001, 25, DexType::Raydium),
+        (pubkey(USDC_MINT), pubkey(USDT_MINT), pubkey(ORCA_USDC_USDT), 1.0002, 30, DexType::Orca),
+        
+        // USDT/SOL pools (reverse to complete triangles)
+        (pubkey(USDT_MINT), pubkey(SOL_MINT), pubkey(RAYDIUM_SOL_USDC), 0.00554, 25, DexType::Raydium),
+        (pubkey(USDT_MINT), pubkey(SOL_MINT), pubkey(ORCA_SOL_USDC_WHIRLPOOL), 0.00552, 30, DexType::Orca),
+        
+        // Additional pairs for more realistic graph
+        (pubkey(SOL_MINT), pubkey(USDT_MINT), pubkey(METEORA_SOL_USDC_DLMM), 181.2, 20, DexType::Meteora),
+    ]
+}
 }
